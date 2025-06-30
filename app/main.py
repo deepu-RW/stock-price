@@ -46,7 +46,9 @@ async def fetch_intraday_data(symbol: str, interval: str) -> dict:
         print(f"Requesting URL: {BASE_URL} with params: {params}")
         response = requests.get(BASE_URL, params=params, timeout=30)
         response.raise_for_status()
+        print("resp: ", response)
         data = response.json()
+        print("data0: ", data)
         
         # Check for API errors
         if "Error Message" in data:
@@ -127,6 +129,7 @@ async def get_1min_candlesticks(symbol: str):
         CandlestickResponse with 1-minute interval data
     """
     data = await fetch_intraday_data(symbol, "1min")
+    print("Data: ", data)
     return process_candlestick_data(data, symbol, "1min")
 
 @app.get("/candlestick/15min/{symbol}", response_model=CandlestickResponse)
