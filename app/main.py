@@ -1,12 +1,17 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import yfinance as yf
+import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import os
+from urllib.parse import quote
 
 app = FastAPI(title="Candlestick Data API", version="1.0.0")
+
+# Configuration
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "3N4OT147KXKHUZOR")
+BASE_URL = "https://www.alphavantage.co/query"
 
 # Response Models
 class Candlestick(BaseModel):
@@ -23,65 +28,72 @@ class CandlestickResponse(BaseModel):
     data: List[Candlestick]
     last_updated: str
 
-# Helper function to fetch data from Yahoo Finance
-async def fetch_intraday_data(symbol: str, interval: str, period: str) -> pd.DataFrame:
+# Helper function to fetch data from Alpha Vantage
+async def fetch_intraday_data(symbol: str, interval: str) -> dict:
     print(f"Fetching intraday data for {symbol} with interval {interval}...")
     """
-    Fetch intraday data from Yahoo Finance API
+    Fetch intraday data from Alpha Vantage API
     """
+    params = {
+        "function": "TIME_SERIES_INTRADAY",
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "apikey": ALPHA_VANTAGE_API_KEY,
+        "outputsize": "compact"  # Last 100 data points
+    }
+    
     try:
-        ticker = yf.Ticker(symbol.upper())
-        print(f"Requesting data for {symbol} with interval {interval} and period {period}")
+        print(f"Requesting URL: {BASE_URL} with params: {params}")
+        response = requests.get(BASE_URL, params=params, timeout=30)
+        response.raise_for_status()
+        print("resp: ", response)
+        data = response.json()
+        print("data0: ", data)
         
-        # Download historical data
-        data = ticker.history(period=period, interval=interval)
+        # Check for API errors
+        if "Error Message" in data:
+            error_message = data["Error Message"]
+            print(f"API Error: {error_message}")
+            raise HTTPException(status_code=400, detail=f"Invalid symbol: {symbol}")
         
-        if data.empty:
-            print(f"No data found for symbol: {symbol}")
-            raise HTTPException(status_code=404, detail=f"No data found for symbol: {symbol}")
+        if "Note" in data:
+            raise HTTPException(status_code=429, detail="API call frequency limit reached")
             
-        print(f"Successfully fetched {len(data)} data points")
         return data
     
-    except Exception as e:
-        print(f"Error fetching data: {str(e)}")
+    except requests.RequestException as e:
         raise HTTPException(status_code=503, detail=f"External API error: {str(e)}")
 
-def process_candlestick_data(data: pd.DataFrame, symbol: str, interval: str) -> CandlestickResponse:
+def process_candlestick_data(data: dict, symbol: str, interval: str) -> CandlestickResponse:
     """
-    Process raw Yahoo Finance data into structured candlestick format
+    Process raw API data into structured candlestick format
     """
-    print("Processing candlestick data...")
-    print("Data columns:", data.columns.tolist())
+    time_series_key = f"Time Series ({interval})"
     
-    if data.empty:
+    if time_series_key not in data:
         raise HTTPException(status_code=404, detail="No data found for the given symbol")
     
+    time_series = data[time_series_key]
     candlesticks = []
     
-    # Process data (most recent first)
-    for timestamp, row in data.iterrows():
-        try:
-            candlestick = Candlestick(
-                timestamp=timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                open=round(float(row['Open']), 2),
-                high=round(float(row['High']), 2),
-                low=round(float(row['Low']), 2),
-                close=round(float(row['Close']), 2),
-                volume=int(row['Volume'])
-            )
-            candlesticks.append(candlestick)
-        except Exception as e:
-            print(f"Error processing row {timestamp}: {str(e)}")
-            continue
+    # Sort by timestamp (most recent first)
+    sorted_timestamps = sorted(time_series.keys(), reverse=True)
     
-    # Reverse to get most recent first
-    candlesticks.reverse()
+    for timestamp in sorted_timestamps:
+        candle_data = time_series[timestamp]
+        
+        candlestick = Candlestick(
+            timestamp=timestamp,
+            open=float(candle_data["1. open"]),
+            high=float(candle_data["2. high"]),
+            low=float(candle_data["3. low"]),
+            close=float(candle_data["4. close"]),
+            volume=int(candle_data["5. volume"])
+        )
+        candlesticks.append(candlestick)
     
-    # Get last updated time
-    last_updated = datetime.now().isoformat()
-    
-    print(f"Processed {len(candlesticks)} candlesticks")
+    # Get last refreshed time
+    last_updated = data.get("Meta Data", {}).get("3. Last Refreshed", "Unknown")
     
     return CandlestickResponse(
         symbol=symbol.upper(),
@@ -96,14 +108,13 @@ async def root():
     Root endpoint with API information
     """
     return {
-        "message": "Candlestick Data API (Yahoo Finance)",
+        "message": "Candlestick Data API",
         "version": "1.0.0",
         "endpoints": [
             "/candlestick/1min/{symbol}",
             "/candlestick/15min/{symbol}",
             "/candlestick/1hour/{symbol}"
-        ],
-        "data_source": "Yahoo Finance (yfinance)"
+        ]
     }
 
 @app.get("/candlestick/1min/{symbol}", response_model=CandlestickResponse)
@@ -117,7 +128,8 @@ async def get_1min_candlesticks(symbol: str):
     Returns:
         CandlestickResponse with 1-minute interval data
     """
-    data = await fetch_intraday_data(symbol, "1m", "1d")  # 1 day of 1-minute data
+    data = await fetch_intraday_data(symbol, "1min")
+    print("Data: ", data)
     return process_candlestick_data(data, symbol, "1min")
 
 @app.get("/candlestick/15min/{symbol}", response_model=CandlestickResponse)
@@ -131,7 +143,7 @@ async def get_15min_candlesticks(symbol: str):
     Returns:
         CandlestickResponse with 15-minute interval data
     """
-    data = await fetch_intraday_data(symbol, "15m", "5d")  # 5 days of 15-minute data
+    data = await fetch_intraday_data(symbol, "15min")
     return process_candlestick_data(data, symbol, "15min")
 
 @app.get("/candlestick/1hour/{symbol}", response_model=CandlestickResponse)
@@ -145,8 +157,8 @@ async def get_1hour_candlesticks(symbol: str):
     Returns:
         CandlestickResponse with 1-hour interval data
     """
-    data = await fetch_intraday_data(symbol, "1h", "30d")  # 30 days of 1-hour data
-    return process_candlestick_data(data, symbol, "1hour")
+    data = await fetch_intraday_data(symbol, "60min")
+    return process_candlestick_data(data, symbol, "60min")
 
 # Health check endpoint
 @app.get("/health")
@@ -164,12 +176,10 @@ async def get_available_intervals():
     """
     return {
         "available_intervals": [
-            {"interval": "1min", "description": "1-minute candlesticks (1 day of data)"},
-            {"interval": "15min", "description": "15-minute candlesticks (5 days of data)"},
-            {"interval": "1hour", "description": "1-hour candlesticks (30 days of data)"}
-        ],
-        "data_source": "Yahoo Finance",
-        "note": "No API key required"
+            {"interval": "1min", "description": "1-minute candlesticks"},
+            {"interval": "15min", "description": "15-minute candlesticks"},
+            {"interval": "1hour", "description": "1-hour candlesticks"}
+        ]
     }
 
 if __name__ == "__main__":
