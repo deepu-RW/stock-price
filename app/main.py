@@ -36,16 +36,11 @@ def load_nifty_instruments():
     
     if _instruments_cache is not None:
         return _instruments_cache
-    
     try:
-        if not os.path.exists("NIFTY.json"):
-            raise FileNotFoundError("NIFTY.json not found in the current directory")
-            
         with open("NIFTY.json", "r") as file:
             instruments = json.load(file)
-        
-        _instruments_cache = instruments
-        return instruments
+            _instruments_cache = instruments
+            return instruments
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
