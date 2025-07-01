@@ -36,11 +36,20 @@ def load_nifty_instruments():
     
     if _instruments_cache is not None:
         return _instruments_cache
+    
     try:
-        with open("NIFTY.json", "r") as file:
+        # Get the directory where this script is located
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        json_path = os.path.join(current_dir, "NIFTY.json")
+        
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"NIFTY.json not found at {json_path}")
+            
+        with open(json_path, "r") as file:
             instruments = json.load(file)
-            _instruments_cache = instruments
-            return instruments
+        
+        _instruments_cache = instruments
+        return instruments
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -159,11 +168,17 @@ async def get_historical_data_endpoint(
 async def health_check():
     """Health check endpoint"""
     try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        json_path = os.path.join(current_dir, "NIFTY.json")
+        
         instruments = load_nifty_instruments()
         return {
             "status": "healthy",
             "instruments_loaded": len(instruments),
-            "nifty_json_exists": os.path.exists("NIFTY.json")
+            "nifty_json_exists": os.path.exists(json_path),
+            "json_path": json_path,
+            "current_working_directory": os.getcwd(),
+            "script_directory": current_dir
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
