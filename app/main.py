@@ -189,6 +189,11 @@ def get_historical_data_with_dates(instrument_key: str, symbol: str, unit: str =
         # Calculate the date to fetch
         fetch_date = current_date - timedelta(days=days_back)
         to_date = fetch_date.strftime('%Y-%m-%d')
+        print("Instrument key:", instrument_key)
+        print("Symbol:", symbol)
+        print("Unit:", unit)
+        print("Interval:", interval)
+        print("To date:", to_date)
         
         # Build the URL with date parameters
         url = f"https://api.upstox.com/v3/historical-candle/intraday/{instrument_key}/{unit}/{interval}"
@@ -203,12 +208,13 @@ def get_historical_data_with_dates(instrument_key: str, symbol: str, unit: str =
             
             if response.status_code == 200:
                 data = response.json().get("data", {})
+                print("DATA: ", data)
                 candles = data.get('candles', [])
                 
                 if candles:
                     # Add candles to the beginning of the list (older candles first)
                     all_candles = candles + all_candles
-                    print(f"Fetched {len(candles)} candles for {to_date}. Total: {len(all_candles)}")
+                    print(f"Fetched {len(candles)} candles with {interval} {unit} interval for {to_date}. Total: {len(all_candles)}")
                 
                 days_back += 1
                 
