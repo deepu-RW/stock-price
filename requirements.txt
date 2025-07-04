@@ -11,3 +11,4 @@ yfinance==0.2.28
 pytz
 aiohttp
 asyncio
+loguru

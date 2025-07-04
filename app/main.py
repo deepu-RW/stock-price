@@ -12,6 +12,12 @@ from datetime import datetime
 import pytz
 from enum import Enum
 from datetime import datetime, timedelta
+from loguru import logger
+import sys
+
+logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module", level="INFO")
+logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module", level="DEBUG")
+logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module", level="ERROR")
 
 app = FastAPI(
     title="NIFTY Historical Data API",
@@ -169,7 +175,8 @@ def filter_candles_by_interval(candles, interval: str, limit: int):
     # Return the requested number of latest candles
     return processed_candles[:limit]
 
-def get_historical_data_with_dates(instrument_key: str, symbol: str, unit: str = "minutes", interval: int = 1, min_candles: int = 50):
+
+def get_historical_data(instrument_key: str, symbol: str, unit: str = "minutes", interval: int = 1, min_candles: int = 50):
     """Fetch historical candle data, going back to previous dates if needed"""
     
     payload = {}
@@ -184,69 +191,55 @@ def get_historical_data_with_dates(instrument_key: str, symbol: str, unit: str =
     all_candles = []
     days_back = 0
     max_days_back = 7  # Don't go back more than 7 days
+
+    fetch_date = current_date - timedelta(days=days_back)
+    to_date = fetch_date.strftime('%Y-%m-%d')
+    print("Fetch date: ", fetch_date)
+    print("To date: ", to_date)
+    print("Instrument key:", instrument_key)
+    print("Symbol:", symbol)
+    print("Unit:", unit)
+    print("Interval:", interval)
+    print("To date:", to_date)
     
-    while len(all_candles) < min_candles and days_back <= max_days_back:
-        # Calculate the date to fetch
-        fetch_date = current_date - timedelta(days=days_back)
-        to_date = fetch_date.strftime('%Y-%m-%d')
-        print("Instrument key:", instrument_key)
-        print("Symbol:", symbol)
-        print("Unit:", unit)
-        print("Interval:", interval)
-        print("To date:", to_date)
+    # Build the URL with date parameters
+    url = f"https://api.upstox.com/v3/historical-candle/intraday/{instrument_key}/{unit}/{interval}"
+    params = {
+        'to_date': to_date
+    }
+    
+    print(f"Fetching data for {symbol} - Date: {to_date}, URL: {url}")
+    
+    try:
+        response = requests.get(url, headers=headers, data=payload, params=params, timeout=30)
         
-        # Build the URL with date parameters
-        url = f"https://api.upstox.com/v3/historical-candle/intraday/{instrument_key}/{unit}/{interval}"
-        params = {
-            'to_date': to_date
-        }
-        
-        print(f"Fetching data for {symbol} - Date: {to_date}, URL: {url}")
-        
-        try:
-            response = requests.get(url, headers=headers, data=payload, params=params, timeout=30)
+        if response.status_code == 200:
+            data = response.json().get("data", {})
+            print("DATA: ", data)
+            candles = data.get('candles', [])
             
-            if response.status_code == 200:
-                data = response.json().get("data", {})
-                print("DATA: ", data)
-                candles = data.get('candles', [])
-                
-                if candles:
-                    # Add candles to the beginning of the list (older candles first)
-                    all_candles = candles + all_candles
-                    print(f"Fetched {len(candles)} candles with {interval} {unit} interval for {to_date}. Total: {len(all_candles)}")
-                
-                days_back += 1
-                
-                # If we got enough candles, break
-                if len(all_candles) >= min_candles:
-                    break
-                    
-            else:
-                print(f"API error for {to_date}: {response.status_code} - {response.text}")
-                days_back += 1
-                
-        except requests.exceptions.Timeout:
-            print(f"Timeout for {to_date}")
+            if candles:
+                # Add candles to the beginning of the list (older candles first)
+                all_candles += candles
+                print(f"Fetched {len(candles)} candles with {interval} {unit} interval for {to_date}. Total: {len(all_candles)}")
+            
             days_back += 1
-        except requests.exceptions.RequestException as e:
-            print(f"Network error for {to_date}: {str(e)}")
-            days_back += 1
-    
-    if len(all_candles) < min_candles:
-        raise HTTPException(
-            status_code=503, 
-            detail=f"Could not fetch enough candles. Got {len(all_candles)}, need {min_candles}"
-        )
+        else:
+            print(f"API error for {to_date}: {response.status_code} - {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"Request error for {to_date}: {str(e)}")
+        days_back += 1
+
+    print("ALL CANDLES: ", all_candles)
+    # if len(all_candles) < min_candles:
+    #     raise HTTPException(
+    #         status_code=503, 
+    #         detail=f"Could not fetch enough candles. Got {len(all_candles)}, need {min_candles}"
+    #     )
     
     return all_candles
 
 # Update the original function to use the new one
-def get_historical_data(instrument_key: str, symbol: str, unit: str = "minutes", interval: int = 1):
-    """Fetch historical candle data for the instrument"""
-    min_candles = 100 if unit == "minutes" and interval == 1 else 50
-    return get_historical_data_with_dates(instrument_key, symbol, unit, interval, min_candles)
-
 async def fetch_historical_data_async(session, base_url: str, symbol: str, limit: Optional[int] = None, unit: str = "minutes", interval: int = 1):
     """Async function to fetch historical data for a symbol"""
     try:
@@ -577,8 +570,9 @@ def calculate_ema(prices: List[float], period: int) -> List[float]:
     
     return ema
 
-def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
+def calculate_rsi(prices: List[float]) -> List[float]:
     """Calculate Relative Strength Index"""
+    period = 14
     if len(prices) < period + 1:
         return []
     
@@ -621,7 +615,53 @@ def extract_prices_and_volumes(candles: List[List]) -> Tuple[List[float], List[f
     
     return prices, volumes
 
-def analyze_trading_signal(candles_1m: List[List], candles_15m: List[List], candles_1h: List[List]) -> TradingSignal:
+def extract_hlcv(candles: List[List]) -> Tuple[List[float], List[float], List[float], List[float]]:
+    """Extract high, low, close, and volume from candle data"""
+    high, low, close, volume = [], [], [], []
+    for candle in candles:
+        if len(candle) > 5:
+            high.append(candle[2])
+            low.append(candle[3])
+            close.append(candle[4])
+            volume.append(candle[5])
+    return high, low, close, volume
+
+
+def calculate_mvwap(highs: List[float], lows: List[float], closes: List[float], volumes: List[float], period: int = 20) -> float:
+    """
+    Calculate Moving Volume Weighted Average Price
+    
+    Args:
+        highs, lows, closes, volumes: OHLCV data lists
+        period: Rolling window period (default 20)
+    
+    Returns:
+        float: MVWAP value for the most recent period
+    """
+    if not (len(highs) == len(lows) == len(closes) == len(volumes)):
+        raise ValueError("All input lists must have the same length")
+    
+    if len(highs) < period:
+        # If not enough data, use all available data
+        start_idx = 0
+    else:
+        # Use last 'period' bars
+        start_idx = len(highs) - period
+    
+    cumulative_pv = 0
+    cumulative_volume = 0
+    
+    for i in range(start_idx, len(highs)):
+        typical_price = (highs[i] + lows[i] + closes[i]) / 3
+        cumulative_pv += typical_price * volumes[i]
+        cumulative_volume += volumes[i]
+    
+    if cumulative_volume == 0:
+        return 0
+    
+    return cumulative_pv / cumulative_volume
+        
+def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candles_15m: List[List]) -> TradingSignal:
     """
     Analyze trading signal based on improved multi-timeframe strategy:
     - Primary Crossover: EMA(9) > EMA(21) on 1m timeframe
@@ -630,7 +670,20 @@ def analyze_trading_signal(candles_1m: List[List], candles_15m: List[List], cand
     - RSI(1m) crosses above 50
     - Volume spike > 1.5x avg volume
     """
+    logger.info("Analyzing trading signal")
+
+    if len(candles_1m) >= 30:
+        high_1m, low_1m, close_1m, volume_1m = extract_hlcv(candles_1m)
+        mvwap_1m_fast = calculate_mvwap(high_1m, low_1m, close_1m, volume_1m, period=10)  # Fast MVWAP
+        mvwap_1m_slow = calculate_mvwap(high_1m, low_1m, close_1m, volume_1m, period=30)  # Slow MVWAP
     
+    if len(candles_5m) >= 12:
+        high_5m, low_5m, close_5m, volume_5m = extract_hlcv(candles_5m)
+        mvwap_5m = calculate_mvwap(high_5m, low_5m, close_5m, volume_5m, period=15)
+    
+    if len(candles_15m) >= 8:
+        high_15m, low_15m, close_15m, volume_15m = extract_hlcv(candles_15m)
+        mvwap_15m = calculate_mvwap(high_15m, low_15m, close_15m, volume_15m, period=10)
     reasons = []
     technical_indicators = {}
     signal = "HOLD"
@@ -639,8 +692,13 @@ def analyze_trading_signal(candles_1m: List[List], candles_15m: List[List], cand
     try:
         # Extract data for all timeframes
         prices_1m, volumes_1m = extract_prices_and_volumes(candles_1m)
+        logger.info(f"1m prices length: {len(prices_1m)}")
+        prices_5m, volumes_5m = extract_prices_and_volumes(candles_5m)
+        logger.info(f"5m prices length: {len(prices_5m)}")
         prices_15m, volumes_15m = extract_prices_and_volumes(candles_15m)
-        prices_1h, volumes_1h = extract_prices_and_volumes(candles_1h)
+        logger.info(f"15m prices length: {len(prices_15m)}")
+
+
         
         # Check minimum data requirements
         if len(prices_1m) < 50:
@@ -650,35 +708,48 @@ def analyze_trading_signal(candles_1m: List[List], candles_15m: List[List], cand
                 technical_indicators={}
             )
         
-        if len(prices_15m) < 50:
+        if len(prices_5m) < 13:
             return TradingSignal(
                 signal="HOLD", confidence=0.0,
-                reasons=["Insufficient 15m data for analysis"],
+                reasons=["Insufficient 5m data for analysis"],
                 technical_indicators={}
             )
-            
-        if len(prices_1h) < 50:
-            return TradingSignal(
-                signal="HOLD", confidence=0.0,
-                reasons=["Insufficient 1h data for analysis"],
-                technical_indicators={}
-            )
+        
+        # if len(prices_15m) < 50:
+        #     return TradingSignal(
+        #         signal="HOLD", confidence=0.0,
+        #         reasons=["Insufficient 15m data for analysis"],
+        #         technical_indicators={}
+        #     )
+        
+        logger.info("Calculating EMA values for 1m, 5m, 15m")
         
         # Calculate EMAs for 1m
+        ema5_1m = calculate_ema(prices_1m, 5)
+        ema8_1m = calculate_ema(prices_1m, 8)
         ema9_1m = calculate_ema(prices_1m, 9)
         ema21_1m = calculate_ema(prices_1m, 21)
-        
-        # Calculate EMAs for 15m
-        ema21_15m = calculate_ema(prices_15m, 21)
-        ema50_15m = calculate_ema(prices_15m, 50)
-        
-        # Calculate EMAs for 1h
-        ema21_1h = calculate_ema(prices_1h, 21)
-        ema50_1h = calculate_ema(prices_1h, 50)
-        
-        # Calculate RSI for 1m
-        rsi_1m = calculate_rsi(prices_1m, 14)
-        
+        ema26_1m = calculate_ema(prices_1m, 26)
+
+        # Calculate EMAs for 5m
+        ema3_5m = calculate_ema(prices_5m, 3)
+        ema5_5m = calculate_ema(prices_5m, 5)
+        ema8_5m = calculate_ema(prices_5m, 8)
+        ema13_5m = calculate_ema(prices_5m, 13)
+        ema21_5m = calculate_ema(prices_5m, 21)
+
+        # Calculate RSI for 1m, 5m and 15m
+        rsi_1m = calculate_rsi(prices_1m)
+        # rsi_5m = calculate_rsi(prices_5m)
+        # rsi_15m = calculate_rsi(prices_15m)
+
+    
+        # Check for volume spike
+        avg_volume_1m = sum(volumes_1m[-20:]) / len(volumes_1m[-20:]) if len(volumes_1m) >= 20 else None
+        avg_volume_5m = sum(volumes_5m[-20:]) / len(volumes_5m[-20:]) if len(volumes_5m) >= 20 else None
+        avg_volume_15m = sum(volumes_15m[-20:]) / len(volumes_15m[-20:]) if len(volumes_15m) >= 20 else None
+
+    
         # Store technical indicators
         technical_indicators = {
             "1m": {
@@ -689,86 +760,115 @@ def analyze_trading_signal(candles_1m: List[List], candles_15m: List[List], cand
                 "current_volume": volumes_1m[-1] if volumes_1m else None,
                 "avg_volume": sum(volumes_1m[-20:]) / len(volumes_1m[-20:]) if len(volumes_1m) >= 20 else None
             },
-            "15m": {
-                "current_price": prices_15m[-1],
-                "ema21": ema21_15m[-1] if ema21_15m else None,
-                "ema50": ema50_15m[-1] if ema50_15m else None
-            },
-            "1h": {
-                "current_price": prices_1h[-1],
-                "ema21": ema21_1h[-1] if ema21_1h else None,
-                "ema50": ema50_1h[-1] if ema50_1h else None
+            "5m": {
+                "current_price": prices_5m[-1],
+                "ema3": ema3_5m[-1] if ema3_5m else None,
+                "ema5": ema5_5m[-1] if ema5_5m else None,
+                "ema8": ema8_5m[-1] if ema8_5m else None,
+                "ema13": ema13_5m[-1] if ema13_5m else None,
+                "ema21": ema21_5m[-1] if ema21_5m else None
             }
         }
         
-        # Check buy conditions based on new strategy
+        # # Check buy conditions based on new strategy
         buy_conditions = []
+        conditions_met = 0
         
         # Condition 1: Primary Crossover - EMA(9) > EMA(21) on 1m
         if ema9_1m and ema21_1m and ema9_1m[-1] > ema21_1m[-1]:
             buy_conditions.append("1m_primary_crossover")
-            reasons.append("✅ 1m EMA9 greater than EMA21 (Primary Crossover)")
-            confidence += 30
+            reasons.append("✅ 1m EMA9 greater than EMA21")
+            conditions_met += 1
         else:
             reasons.append("❌ 1m EMA9 not above EMA21")
+
         
-        # Condition 2: Trend Filter - EMA(21) > EMA(50) on 15m
-        if ema21_15m and ema50_15m and ema21_15m[-1] > ema50_15m[-1]:
-            buy_conditions.append("15m_trend_filter")
-            reasons.append("✅ 15m EMA21 greater than EMA21 EMA50 (Trend Filter)")
-            confidence += 25
+        # Condition 4: EMA(5) > EMA(9) on 1m
+        if ema5_1m and ema9_1m and ema5_1m[-1] > ema9_1m[-1]:
+            buy_conditions.append("1m_ema5_9")
+            reasons.append("✅ 1m EMA5 greater than EMA9")
+            conditions_met += 1
         else:
-            reasons.append("❌ 15m EMA21 not above EMA50")
+            reasons.append("❌ 1m EMA5 not above EMA9")
         
-        # Condition 3: Higher Timeframe Trend - EMA(21) > EMA(50) on 1h
-        if ema21_1h and ema50_1h and ema21_1h[-1] > ema50_1h[-1]:
-            buy_conditions.append("1h_trend_direction")
-            reasons.append("✅ 1h EMA21 greater than EMA21 EMA50 (Higher TF Trend)")
-            confidence += 20
+        # Condition 5: EMA(9) > EMA(26) on 1m
+        if ema9_1m and ema26_1m and ema9_1m[-1] > ema26_1m[-1]:
+            buy_conditions.append("1m_ema9_26")
+            reasons.append("✅ 1m EMA9 greater than EMA26")
+            conditions_met += 1
         else:
-            reasons.append("❌ 1h trend not bullish")
+            reasons.append("❌ 1m EMA9 not above EMA26")
         
+        # Condition 6: EMA(8) > EMA(21) on 1m
+        if ema8_1m and ema21_1m and ema8_1m[-1] > ema21_1m[-1]:
+            buy_conditions.append("1m_ema8_21")
+            reasons.append("✅ 1m EMA8 greater than EMA21")
+            conditions_met += 1
+        else:
+            reasons.append("❌ 1m EMA8 not above EMA21")
+
+        
+        # Condition 7: EMA(3) > EMA(8) on 5m
+        if ema3_5m and ema8_5m and ema3_5m[-1] > ema8_5m[-1]:
+            buy_conditions.append("5m_ema3_8")
+            reasons.append("✅ 5m EMA3 greater than EMA8")
+            conditions_met += 1
+        else:
+            reasons.append("❌ 5m EMA3 not above EMA8")
+        
+        # Condition 8: EMA(5) > EMA(13) on 5m
+        if ema5_5m and ema13_5m and ema5_5m[-1] > ema13_5m[-1]:
+            buy_conditions.append("5m_ema5_13")
+            reasons.append("✅ 5m EMA5 greater than EMA13")
+            conditions_met += 1
+        else:
+            reasons.append("❌ 5m EMA5 not above EMA13")
+        
+        # Condition 9: EMA(8) > EMA(21) on 5m
+        if ema8_5m and ema21_5m and ema8_5m[-1] > ema21_5m[-1]:
+            buy_conditions.append("5m_ema8_21")
+            reasons.append("✅ 5m EMA8 greater than EMA21")
+            conditions_met += 1
+        else:
+            reasons.append("❌ 5m EMA8 not above EMA21")
+    
         # Condition 4: RSI(1m) crosses above 50
         if rsi_1m and rsi_1m[-1] > 50:
             if len(rsi_1m) > 1 and rsi_1m[-2] <= 50:
                 buy_conditions.append("rsi_crossover")
                 reasons.append("✅ RSI crossed above 50 (Strong momentum)")
-                confidence += 15
+                conditions_met += 1
             elif rsi_1m[-1] > 50:
                 buy_conditions.append("rsi_above_50")
                 reasons.append("✅ RSI above 50 (Positive momentum)")
-                confidence += 10
+                conditions_met += 1
         else:
             reasons.append("❌ RSI below 50")
+
+        if volumes_1m and avg_volume_1m and volumes_1m[-1] > 1.5 * avg_volume_1m:
+            reasons.append("✅ 1m volume spike greater than 1.5x avg volume")
+            conditions_met += 1
+        if volumes_5m and avg_volume_5m and volumes_5m[-1] > 1.5 * avg_volume_5m:
+            reasons.append("✅ 5m volume spike greater than 1.5x avg volume")
+            conditions_met += 1
+        if volumes_15m and avg_volume_15m and volumes_15m[-1] > 1.5 * avg_volume_15m:
+            reasons.append("✅ 15m volume spike greater than 1.5x avg volume")
+            conditions_met += 1
         
-        # Condition 5: Volume spike > 1.5x avg volume
-        if (volumes_1m and len(volumes_1m) >= 20 and 
-            technical_indicators["1m"]["current_volume"] and 
-            technical_indicators["1m"]["avg_volume"]):
-            
-            volume_ratio = technical_indicators["1m"]["current_volume"] / technical_indicators["1m"]["avg_volume"]
-            technical_indicators["1m"]["volume_ratio"] = volume_ratio
-            
-            if volume_ratio > 1.5:
-                buy_conditions.append("volume_spike")
-                reasons.append(f"✅ Volume spike detected ({volume_ratio:.2f}x avg)")
-                confidence += 10
-            else:
-                reasons.append(f"⚠️ Normal volume ({volume_ratio:.2f}x avg)")
-        else:
-            reasons.append("❌ Insufficient volume data")
-        
+ 
         # Determine final signal with stricter criteria
         if len(buy_conditions) >= 4:  # At least 4 out of 5 conditions met
             signal = "BUY"
         elif len(buy_conditions) >= 2 and "1m_primary_crossover" in buy_conditions:
             # Must have primary crossover + at least one more condition
             signal = "HOLD"
-            confidence = min(confidence, 65)
+            # confidence = min(confidence, 65)
         else:
             signal = "HOLD"
-            confidence = max(confidence, 15)
+            # confidence = max(confidence, 15)
+
         
+        confidence = (conditions_met/10)*100
         # Cap confidence at 100
         confidence = min(confidence, 100)
         
@@ -800,14 +900,19 @@ async def get_trading_status(symbol: str):
     
     # Convert symbol to uppercase
     symbol = symbol.upper()
+
+    logger.info("Fetching instruments from NIFTY.json file...")
     
     # Load instruments
     instruments = load_nifty_instruments()
+
+    logger.info("Fetching instrument key from NIFTY.json...")
     
     # Find instrument key
     instrument_key = get_instrument_key(instruments, symbol)
     
     if not instrument_key:
+        logger.error("Unable to find instrument key for symbol '{symbol}'")
         raise HTTPException(
             status_code=404, 
             detail=f"Symbol '{symbol}' not found in NIFTY instruments. Use /symbols endpoint to see available symbols."
@@ -815,17 +920,21 @@ async def get_trading_status(symbol: str):
     
     try:
         # Fetch multi-timeframe data
-        candles_1m = get_historical_data(instrument_key, symbol, "minutes", 1)
-        candles_15m = get_historical_data(instrument_key, symbol, "minutes", 15)
-        candles_1h = get_historical_data(instrument_key, symbol, "hours", 1)
+        candles_1m = get_historical_data(instrument_key, symbol, "minutes", 1, 22)
+        candles_5m = get_historical_data(instrument_key, symbol, "minutes", 5, 22)
+        candles_15m = get_historical_data(instrument_key, symbol, "minutes", 15, 22)
         
-        print(f"Fetched candles - 1m: {len(candles_1m)}, 15m: {len(candles_15m)}, 1h: {len(candles_1h)}")
+        print(f"Fetched candles - 1m: {len(candles_1m)}, 5m: {len(candles_5m)}, 15m: {len(candles_15m)}")
         
         # Analyze trading signal with all three timeframes
-        trading_signal = analyze_trading_signal(candles_1m, candles_15m, candles_1h)
+        trading_signal = analyze_trading_signal(candles_1m, candles_5m, candles_15m)
+
+        print("CANDLES: ", candles_1m)
         
         # Get current price (latest close)
-        current_price = float(candles_1m[-1][4]) if candles_1m else 0.0
+        current_price = float(candles_1m[0][4]) if candles_1m else 0.0
+
+        print("CURRENT PRICE: ", current_price)
         
         # Get current IST time
         ist = pytz.timezone('Asia/Kolkata')
