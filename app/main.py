@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
 import requests
 import json
@@ -8,21 +8,34 @@ import asyncio
 import aiohttp
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from enum import Enum
-from datetime import datetime, timedelta
 from loguru import logger
 import sys
+import numpy as np
+from typing import Tuple
 
+# Selenium imports for auto-download
+import time
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException, TimeoutException
+
+# Configure logging
 logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module", level="INFO")
 logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module", level="DEBUG")
 logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module", level="ERROR")
 
 app = FastAPI(
-    title="NIFTY Historical Data API",
-    description="API to fetch historical candle data for NIFTY instruments",
-    version="1.1.0"
+    title="Advanced NIFTY Trading System",
+    description="Comprehensive API for NSE data download and trading analysis with automated pre-open data fetching",
+    version="2.0.0"
 )
 
 # Enum for interval values
@@ -51,8 +64,97 @@ class MultipleSymbolsResponse(BaseModel):
     results: List[Dict[str, Any]]
     errors: List[Dict[str, str]]
 
+class TradingSignal(BaseModel):
+    signal: str  # "BUY", "HOLD", "SELL"
+    confidence: float  # 0-100
+    reasons: List[str]
+    technical_indicators: Dict[str, Any]
+
+class TradingStatusResponse(BaseModel):
+    symbol: str
+    current_price: float
+    signal: str
+    confidence: float
+    reasons: List[str]
+    technical_analysis: Dict[str, Any]
+    timestamp: str
+
+class DownloadStatusResponse(BaseModel):
+    status: str
+    message: str
+    download_path: str
+    timestamp: str
+    file_size: Optional[int] = None
+
 # Global variable to cache instruments
 _instruments_cache = None
+
+def setup_selenium_driver():
+    """Setup Chrome driver with download preferences"""
+    download_path = os.getcwd()
+    
+    chrome_options = Options()
+    prefs = {
+        "download.default_directory": download_path,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+    
+    # Run in headless mode for production
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        return driver
+    except Exception as e:
+        logger.error(f"Failed to setup Chrome driver: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Driver setup failed: {str(e)}")
+
+def download_nse_preopen_data():
+    """Download NSE pre-open data using Selenium"""
+    driver = None
+    try:
+        logger.info("Starting NSE pre-open data download...")
+        driver = setup_selenium_driver()
+        
+        url = "https://www.nseindia.com/market-data/pre-open-market-cm-and-emerge-market"
+        logger.info(f"Navigating to: {url}")
+        driver.get(url)
+
+        # Wait for the download link to be clickable
+        download_link_locator = (By.ID, "downloadPreopen")
+        wait = WebDriverWait(driver, 30)
+        download_link_element = wait.until(
+            EC.element_to_be_clickable(download_link_locator)
+        )
+
+        logger.info("Download link found. Clicking to start download...")
+        download_link_element.click()
+
+        # Wait for download to complete
+        time.sleep(15)  # Increased wait time for large files
+        
+        logger.info("NSE pre-open data download completed successfully")
+        return True
+        
+    except TimeoutException:
+        logger.error("Timeout waiting for download link")
+        return False
+    except WebDriverException as e:
+        logger.error(f"WebDriver error: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error during download: {str(e)}")
+        return False
+    finally:
+        if driver:
+            driver.quit()
 
 def load_nifty_instruments():
     """Load the filtered NIFTY instruments from NIFTY.json"""
@@ -80,16 +182,11 @@ def get_instrument_key(instruments, symbol):
 def read_csv_symbols(csv_file_path: str = "data.csv", num_symbols: int = 5):
     """Read CSV file and extract specified number of symbols"""
     try:
-        # Read CSV file
         df = pd.read_csv(csv_file_path)
-        
-        # Clean column names (remove trailing spaces and newlines)
         df.columns = df.columns.str.strip()
         
-        # Extract symbols from the SYMBOL column
         if 'SYMBOL' in df.columns:
             symbols = df['SYMBOL'].head(num_symbols).tolist()
-            # Clean symbols (remove any trailing spaces)
             symbols = [str(symbol).strip() for symbol in symbols if pd.notna(symbol)]
             return symbols
         else:
@@ -119,12 +216,9 @@ def convert_interval_to_api_params(interval: str):
 def convert_timestamp_to_ist(timestamp):
     """Convert timestamp to IST 24-hour format"""
     try:
-        # If timestamp is already a datetime object
         if isinstance(timestamp, datetime):
             dt = timestamp
-        # If timestamp is a string, parse it
         elif isinstance(timestamp, str):
-            # Try different timestamp formats
             try:
                 dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
             except:
@@ -132,13 +226,11 @@ def convert_timestamp_to_ist(timestamp):
                     dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
                 except:
                     dt = datetime.strptime(timestamp, '%Y-%m-%dT%H:%M:%S')
-        # If timestamp is a number (Unix timestamp)
         elif isinstance(timestamp, (int, float)):
             dt = datetime.fromtimestamp(timestamp, tz=pytz.UTC)
         else:
-            return timestamp  # Return as-is if we can't parse it
+            return timestamp
         
-        # Convert to IST
         ist = pytz.timezone('Asia/Kolkata')
         if dt.tzinfo is None:
             dt = pytz.UTC.localize(dt)
@@ -147,7 +239,6 @@ def convert_timestamp_to_ist(timestamp):
         return ist_dt.strftime('%Y-%m-%d %H:%M:%S')
     
     except Exception as e:
-        # If conversion fails, return original timestamp
         return timestamp
 
 def filter_candles_by_interval(candles, interval: str, limit: int):
@@ -155,26 +246,19 @@ def filter_candles_by_interval(candles, interval: str, limit: int):
     if not candles:
         return []
     
-    # Convert timestamps to IST and sort by timestamp (most recent first)
     processed_candles = []
     for candle in candles:
         processed_candle = candle.copy()
         if len(processed_candle) > 0:
-            # Assuming first element is timestamp
             processed_candle[0] = convert_timestamp_to_ist(processed_candle[0])
         processed_candles.append(processed_candle)
-    print("processed_candles: ", processed_candles)
     
-    # Sort by timestamp (most recent first)
     try:
         processed_candles.sort(key=lambda x: datetime.strptime(x[0], '%Y-%m-%d %H:%M:%S'), reverse=True)
     except:
-        # If sorting fails, just reverse the list
         processed_candles.reverse()
     
-    # Return the requested number of latest candles
     return processed_candles[:limit]
-
 
 def get_historical_data(instrument_key: str, symbol: str, unit: str = "minutes", interval: int = 1, min_candles: int = 50):
     """Fetch historical candle data, going back to previous dates if needed"""
@@ -184,373 +268,41 @@ def get_historical_data(instrument_key: str, symbol: str, unit: str = "minutes",
         'Accept': 'application/json'
     }
     
-    # Get current date in IST
     ist = pytz.timezone('Asia/Kolkata')
     current_date = datetime.now(ist)
     
     all_candles = []
     days_back = 0
-    max_days_back = 7  # Don't go back more than 7 days
+    max_days_back = 7
 
     fetch_date = current_date - timedelta(days=days_back)
     to_date = fetch_date.strftime('%Y-%m-%d')
-    print("Fetch date: ", fetch_date)
-    print("To date: ", to_date)
-    print("Instrument key:", instrument_key)
-    print("Symbol:", symbol)
-    print("Unit:", unit)
-    print("Interval:", interval)
-    print("To date:", to_date)
     
-    # Build the URL with date parameters
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{instrument_key}/{unit}/{interval}"
     params = {
         'to_date': to_date
     }
     
-    print(f"Fetching data for {symbol} - Date: {to_date}, URL: {url}")
+    logger.info(f"Fetching data for {symbol} - Date: {to_date}")
     
     try:
         response = requests.get(url, headers=headers, data=payload, params=params, timeout=30)
         
         if response.status_code == 200:
             data = response.json().get("data", {})
-            print("DATA: ", data)
             candles = data.get('candles', [])
             
             if candles:
-                # Add candles to the beginning of the list (older candles first)
                 all_candles += candles
-                print(f"Fetched {len(candles)} candles with {interval} {unit} interval for {to_date}. Total: {len(all_candles)}")
-            
-            days_back += 1
+                logger.info(f"Fetched {len(candles)} candles for {symbol}")
         else:
-            print(f"API error for {to_date}: {response.status_code} - {response.text}")
+            logger.error(f"API error for {to_date}: {response.status_code}")
     except requests.exceptions.RequestException as e:
-        print(f"Request error for {to_date}: {str(e)}")
-        days_back += 1
-
-    print("ALL CANDLES: ", all_candles)
-    # if len(all_candles) < min_candles:
-    #     raise HTTPException(
-    #         status_code=503, 
-    #         detail=f"Could not fetch enough candles. Got {len(all_candles)}, need {min_candles}"
-    #     )
+        logger.error(f"Request error for {to_date}: {str(e)}")
     
     return all_candles
 
-# Update the original function to use the new one
-async def fetch_historical_data_async(session, base_url: str, symbol: str, limit: Optional[int] = None, unit: str = "minutes", interval: int = 1):
-    """Async function to fetch historical data for a symbol"""
-    try:
-        if limit is not None:
-            url = f"{base_url}/historical-data/{symbol}/{limit}?unit={unit}&interval={interval}"
-        else:
-            url = f"{base_url}/historical-data/{symbol}?unit={unit}&interval={interval}"
-            
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                return {
-                    "symbol": symbol,
-                    "status": "success",
-                    "data": data
-                }
-            else:
-                error_text = await response.text()
-                return {
-                    "symbol": symbol,
-                    "status": "error",
-                    "error": f"HTTP {response.status}: {error_text}"
-                }
-    except Exception as e:
-        return {
-            "symbol": symbol,
-            "status": "error",
-            "error": str(e)
-        }
-
-@app.get("/", summary="API Information")
-async def root():
-    """Root endpoint with API information"""
-    return {
-        "message": "NIFTY Historical Data API",
-        "version": "1.1.0",
-        "endpoints": {
-            "/symbols": "Get all available NIFTY symbols",
-            "/historical-data/{symbol}/{limit}/{interval}": "Get historical data with specific interval (1min, 15min, 1hr)",
-            "/process-csv-symbols": "Process symbols from CSV and fetch historical data",
-            "/csv-symbols": "Get symbols from CSV file",
-            "/docs": "Interactive API documentation"
-        },
-        "supported_intervals": ["1min", "15min", "1hr"],
-        "timestamp_format": "IST 24-hour format (YYYY-MM-DD HH:MM:SS)"
-    }
-
-@app.get("/csv-symbols", summary="Get Symbols from CSV")
-async def get_csv_symbols(num_symbols: int = Query(default=5, description="Number of symbols to extract", ge=1, le=50)):
-    """Extract symbols from the CSV file"""
-    symbols = read_csv_symbols(num_symbols=num_symbols)
-    return {
-        "total_symbols_extracted": len(symbols),
-        "symbols": symbols,
-        "source": "data.csv"
-    }
-
-@app.get("/process-csv-symbols", response_model=MultipleSymbolsResponse, summary="Process CSV Symbols")
-async def process_csv_symbols(
-    num_symbols: int = Query(default=5, description="Number of symbols to process", ge=1, le=20),
-    limit: Optional[int] = Query(default=None, description="Number of most recent candlesticks to return per symbol"),
-    unit: str = Query(default="minutes", description="Time unit (minutes, hours, days)"),
-    interval: int = Query(default=1, description="Interval value", ge=1),
-    use_internal_api: bool = Query(default=True, description="Use internal API endpoints vs external calls")
-):
-    """
-    Process symbols from CSV file and fetch historical data for each
-    
-    - **num_symbols**: Number of symbols to process from CSV (default: 5)
-    - **limit**: Number of most recent candlesticks to return per symbol (optional)
-    - **unit**: Time unit - minutes, hours, or days (default: minutes)
-    - **interval**: Interval value (default: 1)
-    - **use_internal_api**: If True, uses internal functions; if False, makes HTTP calls to own endpoints
-    """
-    
-    # Get symbols from CSV
-    symbols = read_csv_symbols(num_symbols=num_symbols)
-    
-    results = []
-    errors = []
-    
-    if use_internal_api:
-        # Use internal functions directly
-        instruments = load_nifty_instruments()
-        
-        for symbol in symbols:
-            try:
-                symbol = symbol.upper()
-                instrument_key = get_instrument_key(instruments, symbol)
-                
-                if not instrument_key:
-                    errors.append({
-                        "symbol": symbol,
-                        "error": f"Symbol '{symbol}' not found in NIFTY instruments"
-                    })
-                    continue
-                
-                candles = get_historical_data(instrument_key, symbol, unit, interval)
-                
-                # Apply limit if specified (get most recent candles)
-                original_count = len(candles)
-                if limit is not None and limit > 0:
-                    candles = candles[-limit:] if len(candles) > limit else candles
-                
-                results.append({
-                    "symbol": symbol,
-                    "instrument_key": instrument_key,
-                    "candles": candles,
-                    "metadata": {
-                        "total_candles": len(candles),
-                        "original_total_candles": original_count,
-                        "requested_limit": limit,
-                        "unit": unit,
-                        "interval": interval,
-                        "first_candle": candles[0] if candles else None,
-                        "last_candle": candles[-1] if candles else None
-                    }
-                })
-                
-            except Exception as e:
-                errors.append({
-                    "symbol": symbol,
-                    "error": str(e)
-                })
-    else:
-        # Make HTTP calls to own endpoints (useful for testing)
-        base_url = "http://localhost:8000"  # Adjust this to your actual base URL
-        
-        async with aiohttp.ClientSession() as session:
-            tasks = [
-                fetch_historical_data_async(session, base_url, symbol, limit, unit, interval)
-                for symbol in symbols
-            ]
-            
-            responses = await asyncio.gather(*tasks)
-            
-            for response in responses:
-                if response["status"] == "success":
-                    results.append(response["data"])
-                else:
-                    errors.append({
-                        "symbol": response["symbol"],
-                        "error": response["error"]
-                    })
-    
-    return MultipleSymbolsResponse(
-        processed_symbols=len(symbols),
-        results=results,
-        errors=errors
-    )
-
-@app.get("/symbols", response_model=AvailableSymbolsResponse, summary="Get Available Symbols")
-async def get_available_symbols():
-    """Get all available NIFTY symbols from the JSON file"""
-    instruments = load_nifty_instruments()
-    
-    symbols = [inst.get("trading_symbol") for inst in instruments if inst.get("trading_symbol")]
-    symbols.sort()
-    
-    return AvailableSymbolsResponse(
-        total_symbols=len(symbols),
-        symbols=symbols
-    )
-
-@app.get("/historical-data/{symbol}/{limit}/{interval}", response_model=CandleData, summary="Get Historical Data with Interval")
-async def get_historical_data_with_interval(
-    symbol: str,
-    limit: int,
-    interval: IntervalEnum
-):
-    """
-    Get historical candle data for a specific NIFTY symbol with specified interval
-    
-    - **symbol**: Trading symbol (e.g., JIOFIN, RELIANCE)
-    - **limit**: Number of most recent candlesticks to return
-    - **interval**: Time interval - 1min, 15min, or 1hr
-    
-    Returns data with IST timestamps in 24-hour format, showing the most recent candles first.
-    
-    Examples:
-    - /historical-data/RELIANCE/5/1min - Returns 5 most recent 1-minute candles for RELIANCE
-    - /historical-data/JIOFIN/10/15min - Returns 10 most recent 15-minute candles for JIOFIN
-    - /historical-data/TCS/3/1hr - Returns 3 most recent 1-hour candles for TCS
-    """
-    
-    # Convert symbol to uppercase
-    symbol = symbol.upper()
-    
-    # Load instruments
-    instruments = load_nifty_instruments()
-    
-    # Find instrument key
-    instrument_key = get_instrument_key(instruments, symbol)
-    
-    if not instrument_key:
-        available_symbols = [inst.get("trading_symbol") for inst in instruments if inst.get("trading_symbol")]
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Symbol '{symbol}' not found in NIFTY instruments. Use /symbols endpoint to see available symbols."
-        )
-    
-    # Convert interval to API parameters
-    unit, api_interval = convert_interval_to_api_params(interval)
-    
-    # Fetch historical data
-    candles = get_historical_data(instrument_key, symbol, unit, api_interval)
-    
-    # Filter and process candles with IST timestamps
-    processed_candles = filter_candles_by_interval(candles, interval, limit)
-    
-    # Get current IST time for reference
-    ist = pytz.timezone('Asia/Kolkata')
-    current_ist = datetime.now(ist).strftime('%Y-%m-%d %H:%M:%S')
-    
-    return CandleData(
-        symbol=symbol,
-        instrument_key=instrument_key,
-        candles=processed_candles,
-        metadata={
-            "total_candles": len(processed_candles),
-            "requested_limit": limit,
-            "interval": interval,
-            "unit": unit,
-            "api_interval": api_interval,
-            "timezone": "IST (Asia/Kolkata)",
-            "timestamp_format": "YYYY-MM-DD HH:MM:SS",
-            "current_ist_time": current_ist,
-            "first_candle": processed_candles[0] if processed_candles else None,
-            "last_candle": processed_candles[-1] if processed_candles else None
-        }
-    )
-
-@app.get("/download-pre-open-csv", summary="Download Pre-Open Market CSV")
-async def download_pre_open_csv():
-    """Endpoint to download pre-open market data in CSV format"""
-    try:
-        csv_url = "https://www.nseindia.com/api/market-data-pre-open?key=NIFTY&csv=true&selectValFormat=crores"
-        response = requests.get(csv_url, headers={'User-Agent': 'Mozilla/5.0'})
-
-        if response.status_code == 200:
-            return JSONResponse(
-                content=response.text,
-                media_type="text/csv"
-            )
-        else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail="Failed to download CSV file"
-            )
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=503, detail=f"Network error: {str(e)}")
-
-@app.get("/health", summary="Health Check")
-async def health_check():
-    """Health check endpoint"""
-    try:
-        instruments = load_nifty_instruments()
-        csv_exists = os.path.exists("data.csv")
-        
-        # Get current IST time
-        ist = pytz.timezone('Asia/Kolkata')
-        current_ist = datetime.now(ist).strftime('%Y-%m-%d %H:%M:%S')
-        
-        return {
-            "status": "healthy",
-            "instruments_loaded": len(instruments),
-            "nifty_json_exists": os.path.exists("NIFTY.json"),
-            "data_csv_exists": csv_exists,
-            "current_ist_time": current_ist,
-            "supported_intervals": ["1min", "15min", "1hr"]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
-
-# Exception handlers
-@app.exception_handler(404)
-async def not_found_handler(request, exc):
-    return JSONResponse(
-        status_code=404,
-        content={"error": "Not Found", "message": str(exc.detail)}
-    )
-
-@app.exception_handler(500)
-async def internal_error_handler(request, exc):
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Internal Server Error", "message": "An unexpected error occurred"}
-    )
-
-
-# Add these imports at the top of your existing file
-import numpy as np
-from typing import Tuple
-
-# Add these new response models after your existing models
-class TradingSignal(BaseModel):
-    signal: str  # "BUY", "HOLD", "SELL"
-    confidence: float  # 0-100
-    reasons: List[str]
-    technical_indicators: Dict[str, Any]
-
-class TradingStatusResponse(BaseModel):
-    symbol: str
-    current_price: float
-    signal: str
-    confidence: float
-    reasons: List[str]
-    technical_analysis: Dict[str, Any]
-    timestamp: str
-
-# Add these helper functions for technical analysis
+# Technical Analysis Functions
 def calculate_ema(prices: List[float], period: int) -> List[float]:
     """Calculate Exponential Moving Average"""
     if len(prices) < period:
@@ -559,11 +311,9 @@ def calculate_ema(prices: List[float], period: int) -> List[float]:
     ema = []
     multiplier = 2 / (period + 1)
     
-    # Start with SMA for first EMA value
     sma = sum(prices[:period]) / period
     ema.append(sma)
     
-    # Calculate EMA for remaining values
     for i in range(period, len(prices)):
         ema_value = (prices[i] * multiplier) + (ema[-1] * (1 - multiplier))
         ema.append(ema_value)
@@ -595,7 +345,6 @@ def calculate_rsi(prices: List[float]) -> List[float]:
         
         rsi_values.append(rsi)
         
-        # Update averages for next iteration
         current_gain = gains[i] if gains[i] > 0 else 0
         current_loss = losses[i] if losses[i] > 0 else 0
         
@@ -606,12 +355,11 @@ def calculate_rsi(prices: List[float]) -> List[float]:
 
 def extract_prices_and_volumes(candles: List[List]) -> Tuple[List[float], List[float]]:
     """Extract close prices and volumes from candle data"""
-    # Assuming candle format: [timestamp, open, high, low, close, volume]
     if not candles or len(candles[0]) < 6:
         return [], []
     
-    prices = [float(candle[4]) for candle in candles]  # Close prices
-    volumes = [float(candle[5]) for candle in candles]  # Volumes
+    prices = [float(candle[4]) for candle in candles]
+    volumes = [float(candle[5]) for candle in candles]
     
     return prices, volumes
 
@@ -626,32 +374,15 @@ def extract_hlcv(candles: List[List]) -> Tuple[List[float], List[float], List[fl
             volume.append(candle[5])
     return high, low, close, volume
 
-
-def calculate_mvwap(highs: List[float], lows: List[float], closes: List[float], volumes: List[float], period: int = 20) -> float:
-    """
-    Calculate Moving Volume Weighted Average Price
-    
-    Args:
-        highs, lows, closes, volumes: OHLCV data lists
-        period: Rolling window period (default 20)
-    
-    Returns:
-        float: MVWAP value for the most recent period
-    """
+def calculate_vwap(highs: List[float], lows: List[float], closes: List[float], volumes: List[float]) -> float:
+    """Calculate Volume Weighted Average Price"""
     if not (len(highs) == len(lows) == len(closes) == len(volumes)):
         raise ValueError("All input lists must have the same length")
-    
-    if len(highs) < period:
-        # If not enough data, use all available data
-        start_idx = 0
-    else:
-        # Use last 'period' bars
-        start_idx = len(highs) - period
     
     cumulative_pv = 0
     cumulative_volume = 0
     
-    for i in range(start_idx, len(highs)):
+    for i in range(len(highs)):
         typical_price = (highs[i] + lows[i] + closes[i]) / 3
         cumulative_pv += typical_price * volumes[i]
         cumulative_volume += volumes[i]
@@ -660,96 +391,69 @@ def calculate_mvwap(highs: List[float], lows: List[float], closes: List[float], 
         return 0
     
     return cumulative_pv / cumulative_volume
-        
-def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candles_15m: List[List]) -> TradingSignal:
-    """
-    Analyze trading signal based on improved multi-timeframe strategy:
-    - Primary Crossover: EMA(9) > EMA(21) on 1m timeframe
-    - Trend Filter: EMA(21) > EMA(50) on 15m timeframe  
-    - Higher Timeframe Trend: EMA(21) > EMA(50) on 1h timeframe
-    - RSI(1m) crosses above 50
-    - Volume spike > 1.5x avg volume
-    """
-    logger.info("Analyzing trading signal")
 
-    if len(candles_1m) >= 30:
-        high_1m, low_1m, close_1m, volume_1m = extract_hlcv(candles_1m)
-        mvwap_1m_fast = calculate_mvwap(high_1m, low_1m, close_1m, volume_1m, period=10)  # Fast MVWAP
-        mvwap_1m_slow = calculate_mvwap(high_1m, low_1m, close_1m, volume_1m, period=30)  # Slow MVWAP
+def calculate_confidence_score(conditions_met: Dict[str, bool], weights: Dict[str, float]) -> float:
+    """Calculate confidence score based on weighted conditions"""
+    total_weight = sum(weights.values())
+    achieved_weight = sum(weights[condition] for condition, met in conditions_met.items() if met)
     
-    if len(candles_5m) >= 12:
-        high_5m, low_5m, close_5m, volume_5m = extract_hlcv(candles_5m)
-        mvwap_5m = calculate_mvwap(high_5m, low_5m, close_5m, volume_5m, period=15)
+    if total_weight == 0:
+        return 0.0
     
-    if len(candles_15m) >= 8:
-        high_15m, low_15m, close_15m, volume_15m = extract_hlcv(candles_15m)
-        mvwap_15m = calculate_mvwap(high_15m, low_15m, close_15m, volume_15m, period=10)
+    confidence = (achieved_weight / total_weight) * 100
+    return min(confidence, 100.0)
+
+def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candles_15m: List[List], current_price: float) -> TradingSignal:
+    """Analyze trading signal with focused conditions for intraday trading"""
+    logger.info("Analyzing trading signal with new buy/sell conditions")
+    
     reasons = []
     technical_indicators = {}
     signal = "HOLD"
-    confidence = 0.0
+    
+    # Simplified weights - fewer conditions
+    buy_weights = {
+        "ema_bullish_alignment": 35.0,
+        "rsi_momentum": 25.0,
+        "vwap_breakout": 25.0,
+        "volume_confirmation": 15.0
+    }
+    
+    sell_weights = {
+        "ema_bearish_breakdown": 35.0,
+        "rsi_overbought": 25.0,
+        "vwap_rejection": 25.0,
+        "momentum_loss": 15.0
+    }
     
     try:
-        # Extract data for all timeframes
         prices_1m, volumes_1m = extract_prices_and_volumes(candles_1m)
-        logger.info(f"1m prices length: {len(prices_1m)}")
         prices_5m, volumes_5m = extract_prices_and_volumes(candles_5m)
-        logger.info(f"5m prices length: {len(prices_5m)}")
-        prices_15m, volumes_15m = extract_prices_and_volumes(candles_15m)
-        logger.info(f"15m prices length: {len(prices_15m)}")
-
-
         
-        # Check minimum data requirements
-        if len(prices_1m) < 50:
+        if len(prices_1m) < 30 or len(prices_5m) < 15:
             return TradingSignal(
                 signal="HOLD", confidence=0.0,
-                reasons=["Insufficient 1m data for analysis"],
+                reasons=["Insufficient data for analysis"],
                 technical_indicators={}
             )
         
-        if len(prices_5m) < 13:
-            return TradingSignal(
-                signal="HOLD", confidence=0.0,
-                reasons=["Insufficient 5m data for analysis"],
-                technical_indicators={}
-            )
-        
-        # if len(prices_15m) < 50:
-        #     return TradingSignal(
-        #         signal="HOLD", confidence=0.0,
-        #         reasons=["Insufficient 15m data for analysis"],
-        #         technical_indicators={}
-        #     )
-        
-        logger.info("Calculating EMA values for 1m, 5m, 15m")
-        
-        # Calculate EMAs for 1m
-        ema5_1m = calculate_ema(prices_1m, 5)
-        ema8_1m = calculate_ema(prices_1m, 8)
+        # Calculate EMAs - Focus on most common periods
         ema9_1m = calculate_ema(prices_1m, 9)
         ema21_1m = calculate_ema(prices_1m, 21)
-        ema26_1m = calculate_ema(prices_1m, 26)
-
-        # Calculate EMAs for 5m
-        ema3_5m = calculate_ema(prices_5m, 3)
-        ema5_5m = calculate_ema(prices_5m, 5)
-        ema8_5m = calculate_ema(prices_5m, 8)
-        ema13_5m = calculate_ema(prices_5m, 13)
+        ema9_5m = calculate_ema(prices_5m, 9)
         ema21_5m = calculate_ema(prices_5m, 21)
-
-        # Calculate RSI for 1m, 5m and 15m
+        
+        # Calculate RSI
         rsi_1m = calculate_rsi(prices_1m)
-        # rsi_5m = calculate_rsi(prices_5m)
-        # rsi_15m = calculate_rsi(prices_15m)
-
-    
-        # Check for volume spike
+        
+        # Calculate VWAP
+        high_1m, low_1m, close_1m, volume_1m = extract_hlcv(candles_1m)
+        vwap_1m = calculate_vwap(high_1m, low_1m, close_1m, volume_1m)
+        
+        # Volume analysis
         avg_volume_1m = sum(volumes_1m[-20:]) / len(volumes_1m[-20:]) if len(volumes_1m) >= 20 else None
-        avg_volume_5m = sum(volumes_5m[-20:]) / len(volumes_5m[-20:]) if len(volumes_5m) >= 20 else None
-        avg_volume_15m = sum(volumes_15m[-20:]) / len(volumes_15m[-20:]) if len(volumes_15m) >= 20 else None
-
-    
+        current_volume = volumes_1m[-1] if volumes_1m else 0
+        
         # Store technical indicators
         technical_indicators = {
             "1m": {
@@ -757,120 +461,127 @@ def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candl
                 "ema9": ema9_1m[-1] if ema9_1m else None,
                 "ema21": ema21_1m[-1] if ema21_1m else None,
                 "rsi": rsi_1m[-1] if rsi_1m else None,
-                "current_volume": volumes_1m[-1] if volumes_1m else None,
-                "avg_volume": sum(volumes_1m[-20:]) / len(volumes_1m[-20:]) if len(volumes_1m) >= 20 else None
+                "vwap": vwap_1m,
+                "volume_ratio": current_volume / avg_volume_1m if avg_volume_1m else None
             },
             "5m": {
-                "current_price": prices_5m[-1],
-                "ema3": ema3_5m[-1] if ema3_5m else None,
-                "ema5": ema5_5m[-1] if ema5_5m else None,
-                "ema8": ema8_5m[-1] if ema8_5m else None,
-                "ema13": ema13_5m[-1] if ema13_5m else None,
+                "ema9": ema9_5m[-1] if ema9_5m else None,
                 "ema21": ema21_5m[-1] if ema21_5m else None
             }
         }
         
-        # # Check buy conditions based on new strategy
-        buy_conditions = []
-        conditions_met = 0
+        # BUY CONDITIONS
+        buy_conditions = {}
         
-        # Condition 1: Primary Crossover - EMA(9) > EMA(21) on 1m
-        if ema9_1m and ema21_1m and ema9_1m[-1] > ema21_1m[-1]:
-            buy_conditions.append("1m_primary_crossover")
-            reasons.append("✅ 1m EMA9 greater than EMA21")
-            conditions_met += 1
-        else:
-            reasons.append("❌ 1m EMA9 not above EMA21")
-
+        # 1. EMA Bullish Alignment (Combined EMA condition)
+        if ema9_1m and ema21_1m and ema9_5m and ema21_5m:
+            ema_1m_bullish = ema9_1m[-1] > ema21_1m[-1] and prices_1m[-1] > ema9_1m[-1]
+            ema_5m_bullish = ema9_5m[-1] > ema21_5m[-1]
+            buy_conditions["ema_bullish_alignment"] = ema_1m_bullish and ema_5m_bullish
+            
+            if buy_conditions["ema_bullish_alignment"]:
+                reasons.append("✅ EMA Bullish Alignment: 9>21 on both 1m & 5m + price above 1m EMA9")
+            else:
+                reasons.append("❌ EMA alignment not bullish")
         
-        # Condition 4: EMA(5) > EMA(9) on 1m
-        if ema5_1m and ema9_1m and ema5_1m[-1] > ema9_1m[-1]:
-            buy_conditions.append("1m_ema5_9")
-            reasons.append("✅ 1m EMA5 greater than EMA9")
-            conditions_met += 1
-        else:
-            reasons.append("❌ 1m EMA5 not above EMA9")
+        # 2. RSI Momentum (30-70 range with upward momentum)
+        if rsi_1m and len(rsi_1m) >= 2:
+            rsi_current = rsi_1m[-1]
+            rsi_previous = rsi_1m[-2]
+            buy_conditions["rsi_momentum"] = 30 < rsi_current < 70 and rsi_current > rsi_previous
+            
+            if buy_conditions["rsi_momentum"]:
+                reasons.append(f"✅ RSI Momentum: {rsi_current:.1f} (30-70 range, rising)")
+            else:
+                reasons.append(f"❌ RSI: {rsi_current:.1f} (not in momentum range or falling)")
         
-        # Condition 5: EMA(9) > EMA(26) on 1m
-        if ema9_1m and ema26_1m and ema9_1m[-1] > ema26_1m[-1]:
-            buy_conditions.append("1m_ema9_26")
-            reasons.append("✅ 1m EMA9 greater than EMA26")
-            conditions_met += 1
-        else:
-            reasons.append("❌ 1m EMA9 not above EMA26")
+        # 3. VWAP Breakout
+        if vwap_1m:
+            buy_conditions["vwap_breakout"] = current_price > vwap_1m * 1.002  # 0.2% above VWAP
+            
+            if buy_conditions["vwap_breakout"]:
+                reasons.append(f"✅ VWAP Breakout: Price {current_price:.2f} > VWAP {vwap_1m:.2f}")
+            else:
+                reasons.append(f"❌ Price {current_price:.2f} not above VWAP {vwap_1m:.2f}")
         
-        # Condition 6: EMA(8) > EMA(21) on 1m
-        if ema8_1m and ema21_1m and ema8_1m[-1] > ema21_1m[-1]:
-            buy_conditions.append("1m_ema8_21")
-            reasons.append("✅ 1m EMA8 greater than EMA21")
-            conditions_met += 1
-        else:
-            reasons.append("❌ 1m EMA8 not above EMA21")
-
+        # 4. Volume Confirmation
+        if avg_volume_1m:
+            buy_conditions["volume_confirmation"] = current_volume > 1.5 * avg_volume_1m
+            
+            if buy_conditions["volume_confirmation"]:
+                reasons.append(f"✅ Volume Spike: {current_volume:.0f} > 1.5x avg")
+            else:
+                reasons.append("❌ No significant volume spike")
         
-        # Condition 7: EMA(3) > EMA(8) on 5m
-        if ema3_5m and ema8_5m and ema3_5m[-1] > ema8_5m[-1]:
-            buy_conditions.append("5m_ema3_8")
-            reasons.append("✅ 5m EMA3 greater than EMA8")
-            conditions_met += 1
-        else:
-            reasons.append("❌ 5m EMA3 not above EMA8")
+        # SELL CONDITIONS
+        sell_conditions = {}
         
-        # Condition 8: EMA(5) > EMA(13) on 5m
-        if ema5_5m and ema13_5m and ema5_5m[-1] > ema13_5m[-1]:
-            buy_conditions.append("5m_ema5_13")
-            reasons.append("✅ 5m EMA5 greater than EMA13")
-            conditions_met += 1
-        else:
-            reasons.append("❌ 5m EMA5 not above EMA13")
+        # 1. EMA Bearish Breakdown (Combined EMA condition)
+        if ema9_1m and ema21_1m:
+            price_below_ema9 = prices_1m[-1] < ema9_1m[-1]
+            ema_bearish = ema9_1m[-1] < ema21_1m[-1]
+            sell_conditions["ema_bearish_breakdown"] = price_below_ema9 or ema_bearish
+            
+            if sell_conditions["ema_bearish_breakdown"]:
+                reasons.append("🔴 EMA Bearish Breakdown: Price below EMA9 or EMA9 < EMA21")
+            else:
+                reasons.append("✅ EMA structure remains bullish")
         
-        # Condition 9: EMA(8) > EMA(21) on 5m
-        if ema8_5m and ema21_5m and ema8_5m[-1] > ema21_5m[-1]:
-            buy_conditions.append("5m_ema8_21")
-            reasons.append("✅ 5m EMA8 greater than EMA21")
-            conditions_met += 1
-        else:
-            reasons.append("❌ 5m EMA8 not above EMA21")
-    
-        # Condition 4: RSI(1m) crosses above 50
-        if rsi_1m and rsi_1m[-1] > 50:
-            if len(rsi_1m) > 1 and rsi_1m[-2] <= 50:
-                buy_conditions.append("rsi_crossover")
-                reasons.append("✅ RSI crossed above 50 (Strong momentum)")
-                conditions_met += 1
-            elif rsi_1m[-1] > 50:
-                buy_conditions.append("rsi_above_50")
-                reasons.append("✅ RSI above 50 (Positive momentum)")
-                conditions_met += 1
-        else:
-            reasons.append("❌ RSI below 50")
-
-        if volumes_1m and avg_volume_1m and volumes_1m[-1] > 1.5 * avg_volume_1m:
-            reasons.append("✅ 1m volume spike greater than 1.5x avg volume")
-            conditions_met += 1
-        if volumes_5m and avg_volume_5m and volumes_5m[-1] > 1.5 * avg_volume_5m:
-            reasons.append("✅ 5m volume spike greater than 1.5x avg volume")
-            conditions_met += 1
-        if volumes_15m and avg_volume_15m and volumes_15m[-1] > 1.5 * avg_volume_15m:
-            reasons.append("✅ 15m volume spike greater than 1.5x avg volume")
-            conditions_met += 1
+        # 2. RSI Overbought with Bearish Divergence
+        if rsi_1m and len(rsi_1m) >= 5:
+            rsi_current = rsi_1m[-1]
+            rsi_overbought = rsi_current > 70
+            
+            # Check for bearish divergence
+            price_higher = prices_1m[-1] > max(prices_1m[-5:-1])
+            rsi_lower = rsi_current < max(rsi_1m[-5:-1])
+            bearish_divergence = price_higher and rsi_lower
+            
+            sell_conditions["rsi_overbought"] = rsi_overbought or bearish_divergence
+            
+            if sell_conditions["rsi_overbought"]:
+                divergence_text = " with bearish divergence" if bearish_divergence else ""
+                reasons.append(f"🔴 RSI: {rsi_current:.1f} (overbought{divergence_text})")
+            else:
+                reasons.append(f"✅ RSI: {rsi_current:.1f} (not overbought)")
         
- 
-        # Determine final signal with stricter criteria
-        if len(buy_conditions) >= 4:  # At least 4 out of 5 conditions met
+        # 3. VWAP Rejection
+        if vwap_1m:
+            sell_conditions["vwap_rejection"] = current_price < vwap_1m * 0.998  # 0.2% below VWAP
+            
+            if sell_conditions["vwap_rejection"]:
+                reasons.append(f"🔴 VWAP Rejection: Price {current_price:.2f} < VWAP {vwap_1m:.2f}")
+            else:
+                reasons.append(f"✅ Price holding above VWAP")
+        
+        # 4. Momentum Loss (Price fails to make higher highs)
+        if len(prices_1m) >= 10:
+            recent_high = max(prices_1m[-10:])
+            momentum_loss = prices_1m[-1] < recent_high * 0.995  # 0.5% below recent high
+            
+            sell_conditions["momentum_loss"] = momentum_loss
+            
+            if sell_conditions["momentum_loss"]:
+                reasons.append("🔴 Momentum Loss: Failed to sustain near recent highs")
+            else:
+                reasons.append("✅ Momentum intact")
+        
+        # SIGNAL DETERMINATION
+        buy_confidence = calculate_confidence_score(buy_conditions, buy_weights)
+        sell_confidence = calculate_confidence_score(sell_conditions, sell_weights)
+        
+        # More decisive thresholds
+        if sell_confidence > 70:
+            signal = "SELL"
+            confidence = sell_confidence
+        elif buy_confidence > 70:
             signal = "BUY"
-        elif len(buy_conditions) >= 2 and "1m_primary_crossover" in buy_conditions:
-            # Must have primary crossover + at least one more condition
-            signal = "HOLD"
-            # confidence = min(confidence, 65)
+            confidence = buy_confidence
         else:
             signal = "HOLD"
-            # confidence = max(confidence, 15)
-
+            confidence = max(buy_confidence, sell_confidence)
         
-        confidence = (conditions_met/10)*100
-        # Cap confidence at 100
-        confidence = min(confidence, 100)
+        reasons.append(f"📊 Final - Buy: {buy_confidence:.1f}% | Sell: {sell_confidence:.1f}%")
         
     except Exception as e:
         return TradingSignal(
@@ -883,58 +594,302 @@ def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candl
         signal=signal, confidence=confidence,
         reasons=reasons, technical_indicators=technical_indicators
     )
+# API ENDPOINTS
 
-# Add this new endpoint to your existing FastAPI app
-@app.get("/{symbol}/decide", response_model=TradingStatusResponse, summary="Get Trading Status")
-async def get_trading_status(symbol: str):
-    """
-    Get trading recommendation (BUY/HOLD) for a symbol based on improved multi-timeframe analysis
-    
-    Strategy:
-    - Primary Crossover: EMA(9) > EMA(21) on 1m timeframe
-    - Trend Filter: EMA(21) > EMA(50) on 15m timeframe
-    - Higher Timeframe Trend: EMA(21) > EMA(50) on 1h timeframe
-    - RSI(1m) crosses above 50
-    - Volume spike > 1.5x average volume
-    """
-    
-    # Convert symbol to uppercase
-    symbol = symbol.upper()
+@app.get("/", summary="API Information")
+async def root():
+    """Root endpoint with comprehensive API information"""
+    return {
+        "message": "Advanced NIFTY Trading System",
+        "version": "2.0.0",
+        "features": [
+            "Automated NSE pre-open data download",
+            "Multi-timeframe technical analysis",
+            "Advanced trading signals",
+            "Real-time market data processing"
+        ],
+        "endpoints": {
+            "/download-preopen": "Download latest NSE pre-open data",
+            "/symbols": "Get all available NIFTY symbols",
+            "/historical-data/{symbol}/{limit}/{interval}": "Get historical data",
+            "/{symbol}/decide": "Get trading recommendation",
+            "/process-csv-symbols": "Process symbols from CSV",
+            "/health": "System health check"
+        },
+        "supported_intervals": ["1min", "15min", "1hr"],
+        "timestamp_format": "IST 24-hour format (YYYY-MM-DD HH:MM:SS)"
+    }
 
-    logger.info("Fetching instruments from NIFTY.json file...")
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+def download_pre_open_market_data():
+    """
+    Automates the download of the pre-open market CSV from the NSE India website.
+    The file will be saved in the same directory where the script is run.
+    """
+    # --- 1. Configuration ---
+
+    # The URL of the page with the data
+    url = "https://www.nseindia.com/market-data/pre-open-market-cm-and-emerge-market#"
+
+    # Set the download path to the current working directory (the root folder of your project)
+    download_path = os.getcwd()
+    print(f"Files will be downloaded to: {download_path}")
+
+    # Configure Chrome options
+    chrome_options = webdriver.ChromeOptions()
     
-    # Load instruments
+    # Set preferences for downloading files
+    # - download.default_directory: Specifies the folder to save files in.
+    # - download.prompt_for_download: Disables the "Save As" dialog.
+    # - safebrowsing.enabled: Recommended to keep enabled.
+    prefs = {
+        "download.default_directory": download_path,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+
+    # IMPORTANT: Set a realistic User-Agent. NSE website can block default Selenium User-Agents.
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
+
+    # To run Chrome in the background (without a UI), uncomment the following line
+    # chrome_options.add_argument("--headless")
+
+    # --- 2. Initialize WebDriver ---
+    
+    # Using Selenium's automatic WebDriver manager
+    service = ChromeService()
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    # Define a generous timeout for waiting for elements
+    wait = WebDriverWait(driver, 20)
+
+    try:
+        # --- 3. Navigate and Find the Element ---
+        print(f"Navigating to: {url}")
+        driver.get(url)
+
+        # The target element is a div with two classes: "downloads" and "downloadLink"
+        # We use a CSS Selector for this: 'div.downloads.downloadLink'
+        # We wait until the element is present and clickable to avoid errors
+        print("Waiting for the download button to be clickable...")
+        download_button = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "div.downloads.downloadLink"))
+        )
+        print("Download button found!")
+
+        # --- 4. Click and Wait for Download ---
+        
+        # Get list of files before clicking, to detect the new file later
+        files_before_click = set(os.listdir(download_path))
+
+        # Click the download button
+        download_button.click()
+        print("Download initiated...")
+
+        # Wait for the download to complete
+        # We check the directory for a new file that isn't a temporary '.crdownload' file
+        download_timeout = 30  # seconds
+        start_time = time.time()
+        new_file_path = None
+        
+        while time.time() - start_time < download_timeout:
+            files_after_click = set(os.listdir(download_path))
+            new_files = files_after_click - files_before_click
+
+            if new_files:
+                # Check if the new file is a temporary download file
+                downloaded_file = new_files.pop()
+                if not downloaded_file.endswith(('.crdownload', '.tmp')):
+                    new_file_path = os.path.join(download_path, downloaded_file)
+                    print(f"Success! File downloaded to: {new_file_path}")
+                    break
+            time.sleep(1) # Wait 1 second before checking again
+
+        if not new_file_path:
+            print("Download failed or timed out.")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    finally:
+        # --- 5. Clean Up ---
+        print("Closing the browser.")
+        driver.quit()
+
+
+# --- 3. THE SELENIUM LOGIC (DESIGNED FOR BACKGROUND EXECUTION) ---
+
+def run_selenium_download():
+    """
+    This function contains the blocking Selenium code.
+    It runs in the background and saves the file to the DOWNLOAD_DIR.
+    It does not return anything.
+    """
+    print("BACKGROUND TASK: Starting Selenium download process...")
+
+    # --- Configure Chrome Options ---
+    chrome_options = Options()
+    prefs = {
+        "download.default_directory": DOWNLOAD_DIR,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+
+    # --- Initialize WebDriver ---
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        url = "https://www.nseindia.com/market-data/pre-open-market-cm-and-emerge-market"
+        print(f"BACKGROUND TASK: Navigating to {url}")
+        driver.get(url)
+
+        download_link_locator = (By.ID, "downloadPreopen")
+        wait = WebDriverWait(driver, 30)
+        
+        print("BACKGROUND TASK: Waiting for download link...")
+        download_link_element = wait.until(
+            EC.element_to_be_clickable(download_link_locator)
+        )
+        
+        print("BACKGROUND TASK: Clicking download link.")
+        download_link_element.click()
+
+        # Wait for download to complete (up to 20 seconds)
+        time.sleep(15) # Giving ample time for the download to finish
+        print("BACKGROUND TASK: Download process finished.")
+
+    except Exception as e:
+        print(f"BACKGROUND TASK ERROR: An error occurred during Selenium execution: {e}")
+    finally:
+        print("BACKGROUND TASK: Closing the browser.")
+        driver.quit()
+
+# --- 4. DEFINE THE API ENDPOINTS --
+
+@app.get(
+    "/download-preopen", 
+    response_model=DownloadStatusResponse, 
+    summary="Initiate NSE Pre-Open Data Download",
+    tags=["Data Downloader"]
+)
+async def initiate_download_endpoint(background_tasks: BackgroundTasks):
+    """
+    Initiates the download of the pre-open market data in the background.
+    This endpoint returns immediately with a confirmation message.
+    """
+    print("API ENDPOINT: Received request to download pre-open data.")
+    
+    # Add the long-running Selenium function as a background task
+    background_tasks.add_task(run_selenium_download)
+    
+    # Return an immediate response to the user
+    return DownloadStatusResponse(
+        status="initiated",
+        message="Download of pre-open market data has been initiated. "
+                "Check the status or retrieve the file in a few moments."
+    )
+
+@app.get("/symbols", response_model=AvailableSymbolsResponse, summary="Get Available Symbols")
+async def get_available_symbols():
+    """Get all available NIFTY symbols from the JSON file"""
     instruments = load_nifty_instruments()
-
-    logger.info("Fetching instrument key from NIFTY.json...")
     
-    # Find instrument key
+    symbols = [inst.get("trading_symbol") for inst in instruments if inst.get("trading_symbol")]
+    symbols.sort()
+    
+    return AvailableSymbolsResponse(
+        total_symbols=len(symbols),
+        symbols=symbols
+    )
+
+@app.get("/historical-data/{symbol}/{limit}/{interval}", response_model=CandleData, summary="Get Historical Data")
+async def get_historical_data_with_interval(
+    symbol: str,
+    limit: int,
+    interval: IntervalEnum
+):
+    """Get historical candle data for a specific NIFTY symbol with specified interval"""
+    
+    symbol = symbol.upper()
+    instruments = load_nifty_instruments()
     instrument_key = get_instrument_key(instruments, symbol)
     
     if not instrument_key:
-        logger.error("Unable to find instrument key for symbol '{symbol}'")
         raise HTTPException(
             status_code=404, 
-            detail=f"Symbol '{symbol}' not found in NIFTY instruments. Use /symbols endpoint to see available symbols."
+            detail=f"Symbol '{symbol}' not found in NIFTY instruments."
+        )
+    
+    unit, api_interval = convert_interval_to_api_params(interval)
+    candles = get_historical_data(instrument_key, symbol, unit, api_interval)
+    processed_candles = filter_candles_by_interval(candles, interval, limit)
+    
+    ist = pytz.timezone('Asia/Kolkata')
+    current_ist = datetime.now(ist).strftime('%Y-%m-%d %H:%M:%S')
+    
+    return CandleData(
+        symbol=symbol,
+        instrument_key=instrument_key,
+        candles=processed_candles,
+        metadata={
+            "total_candles": len(processed_candles),
+            "requested_limit": limit,
+            "interval": interval,
+            "timezone": "IST (Asia/Kolkata)",
+            "current_ist_time": current_ist
+        }
+    )
+
+# Updated endpoint call
+@app.get("/{symbol}/decide", response_model=TradingStatusResponse, summary="Get Trading Status")
+async def get_trading_status(symbol: str):
+    """
+    Get trading recommendation (BUY/SELL/HOLD) for a symbol based on focused multi-timeframe analysis
+    
+    Focused Strategy:
+    - Primary: EMA(9) vs EMA(21) on 1m, EMA(5) vs EMA(13) on 5m
+    - RSI momentum and overbought/oversold conditions
+    - Volume analysis for confirmation
+    - MVWAP positioning for price context
+    - Comprehensive sell signals for exit strategies
+    """
+    print("trug")
+    symbol = symbol.upper()
+    logger.info(f"Analyzing trading status for {symbol}")
+    
+    # Load instruments and get instrument key
+    instruments = load_nifty_instruments()
+    instrument_key = get_instrument_key(instruments, symbol)
+    
+    if not instrument_key:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Symbol '{symbol}' not found in NIFTY instruments."
         )
     
     try:
-        # Fetch multi-timeframe data
-        candles_1m = get_historical_data(instrument_key, symbol, "minutes", 1, 22)
-        candles_5m = get_historical_data(instrument_key, symbol, "minutes", 5, 22)
-        candles_15m = get_historical_data(instrument_key, symbol, "minutes", 15, 22)
+        # Fetch multi-timeframe data with reduced periods for faster response
+        candles_1m = get_historical_data(instrument_key, symbol, "minutes", 1, 50)
+        candles_5m = get_historical_data(instrument_key, symbol, "minutes", 5, 25)
+        candles_15m = get_historical_data(instrument_key, symbol, "minutes", 15, 15)
         
-        print(f"Fetched candles - 1m: {len(candles_1m)}, 5m: {len(candles_5m)}, 15m: {len(candles_15m)}")
-        
-        # Analyze trading signal with all three timeframes
-        trading_signal = analyze_trading_signal(candles_1m, candles_5m, candles_15m)
-
-        print("CANDLES: ", candles_1m)
-        
-        # Get current price (latest close)
         current_price = float(candles_1m[0][4]) if candles_1m else 0.0
-
-        print("CURRENT PRICE: ", current_price)
+        
+        # Analyze with improved signal logic
+        trading_signal = analyze_trading_signal(candles_1m, candles_5m, candles_15m, current_price)
         
         # Get current IST time
         ist = pytz.timezone('Asia/Kolkata')
@@ -950,14 +905,209 @@ async def get_trading_status(symbol: str):
             timestamp=current_ist
         )
         
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Error analyzing trading status: {str(e)}"
         )
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+import os
+import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Any
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+import uuid
+from pathlib import Path
+
+# app = FastAPI(title="NSE Pre-Open Market Data Downloader", version="1.0.0")
+
+DOWNLOAD_BASE_PATH = Path("downloads")
+if not DOWNLOAD_BASE_PATH.exists():
+    DOWNLOAD_BASE_PATH.mkdir(parents=True, exist_ok=True)
+
+# Ensure the directory exists, creating it along with any missing parents
+def download_nse_data(session_id: str) -> Dict[str, Any]:
+    """
+    Downloads NSE pre-open market data using Selenium.
+    Returns a dictionary with download status and file path.
+    """
+    # Use base download directory (no session-specific folders)
+    download_path = DOWNLOAD_BASE_PATH
     
+    # Create download directory if it doesn't exist
+    download_path.mkdir(exist_ok=True)
+
+    # Clean up existing CSV files BEFORE starting the download
+    existing_csv_files = []
+    try:
+        all_files = os.listdir(download_path)
+        existing_csv_files = [f for f in all_files if f.endswith('.csv')]
+        
+        if existing_csv_files:
+            print(f"[{session_id}] Found existing CSV files: {existing_csv_files}")
+            for old_csv in existing_csv_files:
+                old_file_path = download_path / old_csv
+                try:
+                    old_file_path.unlink()  # Delete the old file
+                    print(f"[{session_id}] Removed old CSV file: {old_csv}")
+                except Exception as e:
+                    print(f"[{session_id}] Error removing old CSV file {old_csv}: {e}")
+    except Exception as e:
+        print(f"[{session_id}] Error during cleanup: {e}")
+
+    url = "https://www.nseindia.com/market-data/pre-open-market-cm-and-emerge-market#"
+    
+    # Configure Chrome options
+    chrome_options = Options()
+    
+    # Set preferences for downloading files
+    prefs = {
+        "download.default_directory": str(download_path.absolute()),
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+    
+    # Essential options for server environments
+    chrome_options.add_argument("--headless")  # Run in background
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
+    
+    # Initialize WebDriver
+    service = ChromeService()
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    wait = WebDriverWait(driver, 20)
+    
+    try:
+        print(f"[{session_id}] Navigating to: {url}")
+        driver.get(url)
+        
+        # Wait for the download button
+        print(f"[{session_id}] Waiting for download button...")
+        download_button = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "div.downloads.downloadLink"))
+        )
+        print(f"[{session_id}] Download button found!")
+        
+        # Get current files before download (after cleanup)
+        files_before = set(os.listdir(download_path))
+        
+        # Click download button
+        download_button.click()
+        print(f"[{session_id}] Download initiated...")
+        
+        # Wait for download completion
+        download_timeout = 30
+        start_time = time.time()
+        downloaded_file_path = None
+        
+        while time.time() - start_time < download_timeout:
+            try:
+                files_after = set(os.listdir(download_path))
+                new_files = files_after - files_before
+                
+                if new_files:
+                    for file_name in new_files:
+                        if not file_name.endswith(('.crdownload', '.tmp', '.part')):
+                            file_path = download_path / file_name
+                            # Check if file is actually complete (not 0 bytes)
+                            if file_path.exists() and file_path.stat().st_size > 0:
+                                downloaded_file_path = file_path
+                                print(f"[{session_id}] Success! File downloaded: {file_name}")
+                                break
+                    
+                    if downloaded_file_path:
+                        break
+                
+                time.sleep(1)
+            except Exception as e:
+                print(f"[{session_id}] Error during download check: {e}")
+                time.sleep(1)
+        
+        if not downloaded_file_path:
+            return {
+                "success": False,
+                "error": "Download failed or timed out",
+                "session_id": session_id
+            }
+        
+        return {
+            "success": True,
+            "file_path": str(downloaded_file_path),
+            "file_name": downloaded_file_path.name,
+            "session_id": session_id,
+            "replaced_files": existing_csv_files
+        }
+        
+    except Exception as e:
+        print(f"[{session_id}] Error occurred: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "session_id": session_id
+        }
+    
+    finally:
+        try:
+            print(f"[{session_id}] Closing browser...")
+            driver.quit()
+        except Exception as e:
+            print(f"[{session_id}] Error closing browser: {e}")
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"message": "NSE Pre-Open Market Data Downloader API", "status": "active"}
+
+@app.get("/download-nse-data")
+async def download_nse_data_endpoint():
+    """
+    Downloads NSE pre-open market data and returns download information.
+    """
+    session_id = str(uuid.uuid4())
+    
+    try:
+        # Run the download in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(executor, download_nse_data, session_id)
+        
+        if not result["success"]:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        response_data = {
+            "message": "Download completed successfully",
+            "session_id": session_id,
+            "file_name": result["file_name"],
+            "download_url": f"/download-file/{result['file_name']}"
+        }
+        
+        # Add information about replaced files if any
+        if result.get("replaced_files"):
+            response_data["replaced_files"] = result["replaced_files"]
+            response_data["message"] += f" (replaced {len(result['replaced_files'])} existing CSV file(s))"
+        
+        return response_data
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
