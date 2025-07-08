@@ -91,12 +91,12 @@ Returns a real-time **Buy / Hold / Sell** recommendation based on technical indi
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/nifty-predictor-api.git
-cd nifty-predictor-api
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Run the API (for development)
+cd app
 uvicorn main:app --reload
 ```
 
