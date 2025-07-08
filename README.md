@@ -101,17 +101,3 @@ uvicorn main:app --reload
 ```
 
 ---
-
-## 🧠 Behind the Scenes
-
-This API uses:
-- EMA, RSI, Volume Spike, and other indicators
-- Real-time and historical data from NSE
-- Pre-market cues for early signal generation
-- Rule-based logic for simplified trading decisions
-
----
-
-## 📝 License
-
-MIT License
