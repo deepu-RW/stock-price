@@ -320,29 +320,30 @@ def run_selenium_download():
         driver.quit()
 
 
-
 def load_nifty_instruments():
     """Load the filtered NIFTY instruments from NIFTY.json"""
-    global _instruments_cache
-    
-    if _instruments_cache is not None:
-        return _instruments_cache
-    try:
-        with open("NIFTY.json", "r") as file:
-            instruments = json.load(file)
-            _instruments_cache = instruments
-            return instruments
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error loading NIFTY.json: {str(e)}")
+     # Read CSV, handle messy headers
+    try: 
+        current_date = datetime.now().strftime("%d-%b-%Y")
+        df = pd.read_csv(f"downloads/MW-Pre-Open-Market-{current_date}.csv") 
 
-def get_instrument_key(instruments, symbol):
-    """Find instrument key for a given trading symbol"""
-    for instrument in instruments:
-        if instrument.get("trading_symbol") == symbol:
-            return instrument.get("instrument_key")
-    return None
+        # Find the correct SYMBOL column (strip and clean headers)
+        cleaned_columns = [col.strip() for col in df.columns]
+        df.columns = cleaned_columns
+
+        # Sometimes the header might have trailing whitespace or newline
+        symbol_col = next((col for col in df.columns if col.strip().upper() == "SYMBOL"), None)
+
+        if symbol_col is None:
+            raise ValueError("SYMBOL column not found in the CSV file")
+
+        # Return list of symbols
+        return df[symbol_col].dropna().astype(str).str.strip().tolist()
+    except Exception as e:
+        logger.error(f"Could not find CSV file, Call the /download endpoint to download the latest CSV file: {str(e)}")
+        instruments = load_nifty_instruments_json()
+        symbols = [inst.get("trading_symbol") for inst in instruments if inst.get("trading_symbol")]
+        return symbols
 
 def read_csv_symbols(csv_file_path: str = "data.csv", num_symbols: int = 5):
     """Read CSV file and extract specified number of symbols"""
@@ -993,14 +994,14 @@ def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candl
             if buy_conditions["vwap_breakout"]:
                 reasons.append(f"✅ VWAP Breakout: Price {current_price:.2f} > VWAP {vwap_1m:.2f}")
             else:
-                reasons.append(f"❌ Price {current_price:.2f} not above VWAP {vwap_1m:.2f}")
+                reasons.append(f"❌ Current Price {current_price:.2f} not above VWAP {vwap_1m:.2f}")
         
         # 4. Volume Confirmation
         if avg_volume_1m:
             buy_conditions["volume_confirmation"] = current_volume > 1.5 * avg_volume_1m
             
             if buy_conditions["volume_confirmation"]:
-                reasons.append(f"✅ Volume Spike: {current_volume:.0f} > 1.5x avg")
+                reasons.append(f"✅ Volume Spike: {current_volume:.0f} greater than 1.5x avg")
             else:
                 reasons.append("❌ No significant volume spike")
         
@@ -1014,7 +1015,7 @@ def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candl
             sell_conditions["ema_bearish_breakdown"] = price_below_ema9 or ema_bearish
             
             if sell_conditions["ema_bearish_breakdown"]:
-                reasons.append("🔴 EMA Bearish Breakdown: Price below EMA9 or EMA9 < EMA21")
+                reasons.append("🔴 EMA Bearish Breakdown: Price below EMA9 or EMA9 less than EMA21")
             else:
                 reasons.append("✅ EMA structure remains bullish")
         
@@ -1077,7 +1078,7 @@ def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candl
         return TradingSignal(
                 signal=signal, confidence=confidence,
                 reasons=reasons, technical_indicators=technical_indicators
-        )
+            )
         
     except Exception as e:
         logger.error(f"Enhanced analysis error: {str(e)}", exc_info=True)

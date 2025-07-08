@@ -8,7 +8,7 @@ import sys
 import uvicorn
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor
-from utils import download_nse_data
+import pandas as pd
 from enums import (
     IntervalEnum,
     CandleData,
@@ -17,7 +17,7 @@ from enums import (
 )
 from utils import (
     get_historical_data,
-    get_instrument_key,
+    download_nse_data,
     load_nifty_instruments,
     analyze_trading_signal,
     download_nse_data,
@@ -66,15 +66,12 @@ async def root():
 
 @app.get("/symbols", response_model=AvailableSymbolsResponse, summary="Get Available Symbols")
 async def get_available_symbols():
-    """Get all available NIFTY symbols from the JSON file"""
+    """Get all available NIFTY symbols from the CSV file"""
     instruments = load_nifty_instruments()
-    
-    symbols = [inst.get("trading_symbol") for inst in instruments if inst.get("trading_symbol")]
-    symbols.sort()
-    
+
     return AvailableSymbolsResponse(
-        total_symbols=len(symbols),
-        symbols=symbols
+        total_symbols=len(instruments),
+        symbols=instruments
     )
 
 @app.get("/{symbol}/{limit}/{interval}", response_model=CandleData, summary="Get Historical Data")
@@ -86,10 +83,14 @@ async def get_historical_data_with_interval(
     """Get historical candle data for a specific NIFTY symbol with specified interval"""
     
     symbol = symbol.upper()
-    instruments = load_nifty_instruments()
-    instrument_key = get_instrument_key(instruments, symbol)
+    df = pd.read_csv('https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz')
+
+    instrument_key = df.loc[(df.tradingsymbol == symbol) & (df.exchange == 'NSE_EQ'), 'instrument_key'].values[0]
+
+    logger.info(f"Instrument key for {symbol} is {instrument_key}")
     
     if not instrument_key:
+        
         raise HTTPException(
             status_code=404, 
             detail=f"Symbol '{symbol}' not found in NIFTY instruments."
@@ -115,6 +116,7 @@ async def get_historical_data_with_interval(
         }
     )
 
+
 @app.get("/{symbol}/decide", response_model=TradingStatusResponse, summary="Get Trading Status")
 async def get_trading_status(symbol: str):
     """
@@ -130,11 +132,11 @@ async def get_trading_status(symbol: str):
     symbol = symbol.upper()
     logger.info(f"Analyzing trading status for {symbol}")
     
-    # Load instruments and get instrument key
-    instruments = load_nifty_instruments()
-    instrument_key = get_instrument_key(instruments, symbol)
+    df = pd.read_csv('https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz')
 
-    print(instrument_key)
+    instrument_key = df.loc[(df.tradingsymbol == symbol) & (df.exchange == 'NSE_EQ'), 'instrument_key'].values[0]
+
+    logger.info(f"Instrument key for {symbol} is {instrument_key}")
     
     if not instrument_key:
         raise HTTPException(
@@ -149,14 +151,9 @@ async def get_trading_status(symbol: str):
         candles_15m = get_historical_data(instrument_key, symbol, "minutes", 15, 15)
         
         current_price = float(candles_1m[0][4]) if candles_1m else 0.0
-
-        print(candles_1m, candles_5m, candles_15m)
         
         # Analyze with improved signal logic
-        trading_signal = analyze_trading_signal(candles_1m, candles_5m, candles_15m, current_price)
-
-        print("TRADING SIGNAL:", trading_signal)
-        
+        trading_signal = analyze_trading_signal(candles_1m, candles_5m, candles_15m, current_price)        
         # Get current IST time
         ist = pytz.timezone('Asia/Kolkata')
         current_ist = datetime.now(ist).strftime('%Y-%m-%d %H:%M:%S')
@@ -176,7 +173,6 @@ async def get_trading_status(symbol: str):
             status_code=500,
             detail=f"Error analyzing trading status: {str(e)}"
         )
-
 
 @app.get("/download")
 async def download_nse_data_endpoint():
