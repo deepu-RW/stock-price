@@ -127,13 +127,14 @@ async def get_trading_status(symbol: str):
     - MVWAP positioning for price context
     - Comprehensive sell signals for exit strategies
     """
-    print("trug")
     symbol = symbol.upper()
     logger.info(f"Analyzing trading status for {symbol}")
     
     # Load instruments and get instrument key
     instruments = load_nifty_instruments()
     instrument_key = get_instrument_key(instruments, symbol)
+
+    print(instrument_key)
     
     if not instrument_key:
         raise HTTPException(
@@ -148,9 +149,13 @@ async def get_trading_status(symbol: str):
         candles_15m = get_historical_data(instrument_key, symbol, "minutes", 15, 15)
         
         current_price = float(candles_1m[0][4]) if candles_1m else 0.0
+
+        print(candles_1m, candles_5m, candles_15m)
         
         # Analyze with improved signal logic
         trading_signal = analyze_trading_signal(candles_1m, candles_5m, candles_15m, current_price)
+
+        print("TRADING SIGNAL:", trading_signal)
         
         # Get current IST time
         ist = pytz.timezone('Asia/Kolkata')

@@ -914,8 +914,170 @@ def analyze_trading_signal(candles_1m: List[List], candles_5m: List[List], candl
                 technical_indicators={}
             )
         
-        # Continue with the rest of your analysis...
-        # [Rest of your existing analysis code here]
+         # Calculate EMAs - Focus on most common periods
+        ema9_1m = calculate_ema(prices_1m, 9)
+        ema21_1m = calculate_ema(prices_1m, 21)
+        ema9_5m = calculate_ema(prices_5m, 9)
+        ema21_5m = calculate_ema(prices_5m, 21)
+        
+        # Calculate RSI
+        rsi_1m = calculate_rsi(prices_1m)
+        
+        # Calculate VWAP
+        high_1m, low_1m, close_1m, volume_1m = extract_hlcv(candles_1m)
+        vwap_1m = calculate_vwap(high_1m, low_1m, close_1m, volume_1m)
+        
+        # Volume analysis
+        avg_volume_1m = sum(volumes_1m[-20:]) / len(volumes_1m[-20:]) if len(volumes_1m) >= 20 else None
+        current_volume = volumes_1m[-1] if volumes_1m else 0
+        
+        # Store technical indicators
+        technical_indicators = {
+            "1m": {
+                "current_price": prices_1m[-1],
+                "ema9": ema9_1m[-1] if ema9_1m else None,
+                "ema21": ema21_1m[-1] if ema21_1m else None,
+                "rsi": rsi_1m[-1] if rsi_1m else None,
+                "vwap": vwap_1m,
+                "volume_ratio": current_volume / avg_volume_1m if avg_volume_1m else None
+            },
+            "5m": {
+                "ema9": ema9_5m[-1] if ema9_5m else None,
+                "ema21": ema21_5m[-1] if ema21_5m else None
+            }
+        }
+        
+        # BUY CONDITIONS
+        buy_conditions = {}
+
+        buy_weights = {
+            "ema_bullish_alignment": 35.0,
+            "rsi_momentum": 25.0,
+            "vwap_breakout": 25.0,
+            "volume_confirmation": 15.0
+        }
+        
+        sell_weights = {
+            "ema_bearish_breakdown": 35.0,
+            "rsi_overbought": 25.0,
+            "vwap_rejection": 25.0,
+            "momentum_loss": 15.0
+        }
+        
+        # 1. EMA Bullish Alignment (Combined EMA condition)
+        if ema9_1m and ema21_1m and ema9_5m and ema21_5m:
+            ema_1m_bullish = ema9_1m[-1] > ema21_1m[-1] and prices_1m[-1] > ema9_1m[-1]
+            ema_5m_bullish = ema9_5m[-1] > ema21_5m[-1]
+            buy_conditions["ema_bullish_alignment"] = ema_1m_bullish and ema_5m_bullish
+            
+            if buy_conditions["ema_bullish_alignment"]:
+                reasons.append("✅ EMA Bullish Alignment: 9>21 on both 1m & 5m + price above 1m EMA9")
+            else:
+                reasons.append("❌ EMA alignment not bullish")
+        
+        # 2. RSI Momentum (30-70 range with upward momentum)
+        if rsi_1m and len(rsi_1m) >= 2:
+            rsi_current = rsi_1m[-1]
+            rsi_previous = rsi_1m[-2]
+            buy_conditions["rsi_momentum"] = 30 < rsi_current < 70 and rsi_current > rsi_previous
+            
+            if buy_conditions["rsi_momentum"]:
+                reasons.append(f"✅ RSI Momentum: {rsi_current:.1f} (30-70 range, rising)")
+            else:
+                reasons.append(f"❌ RSI: {rsi_current:.1f} (not in momentum range or falling)")
+        
+        # 3. VWAP Breakout
+        if vwap_1m:
+            buy_conditions["vwap_breakout"] = current_price > vwap_1m * 1.002  # 0.2% above VWAP
+            
+            if buy_conditions["vwap_breakout"]:
+                reasons.append(f"✅ VWAP Breakout: Price {current_price:.2f} > VWAP {vwap_1m:.2f}")
+            else:
+                reasons.append(f"❌ Price {current_price:.2f} not above VWAP {vwap_1m:.2f}")
+        
+        # 4. Volume Confirmation
+        if avg_volume_1m:
+            buy_conditions["volume_confirmation"] = current_volume > 1.5 * avg_volume_1m
+            
+            if buy_conditions["volume_confirmation"]:
+                reasons.append(f"✅ Volume Spike: {current_volume:.0f} > 1.5x avg")
+            else:
+                reasons.append("❌ No significant volume spike")
+        
+        # SELL CONDITIONS
+        sell_conditions = {}
+        
+        # 1. EMA Bearish Breakdown (Combined EMA condition)
+        if ema9_1m and ema21_1m:
+            price_below_ema9 = prices_1m[-1] < ema9_1m[-1]
+            ema_bearish = ema9_1m[-1] < ema21_1m[-1]
+            sell_conditions["ema_bearish_breakdown"] = price_below_ema9 or ema_bearish
+            
+            if sell_conditions["ema_bearish_breakdown"]:
+                reasons.append("🔴 EMA Bearish Breakdown: Price below EMA9 or EMA9 < EMA21")
+            else:
+                reasons.append("✅ EMA structure remains bullish")
+        
+        # 2. RSI Overbought with Bearish Divergence
+        if rsi_1m and len(rsi_1m) >= 5:
+            rsi_current = rsi_1m[-1]
+            rsi_overbought = rsi_current > 70
+            
+            # Check for bearish divergence
+            price_higher = prices_1m[-1] > max(prices_1m[-5:-1])
+            rsi_lower = rsi_current < max(rsi_1m[-5:-1])
+            bearish_divergence = price_higher and rsi_lower
+            
+            sell_conditions["rsi_overbought"] = rsi_overbought or bearish_divergence
+            
+            if sell_conditions["rsi_overbought"]:
+                divergence_text = " with bearish divergence" if bearish_divergence else ""
+                reasons.append(f"🔴 RSI: {rsi_current:.1f} (overbought{divergence_text})")
+            else:
+                reasons.append(f"✅ RSI: {rsi_current:.1f} (not overbought)")
+        
+        # 3. VWAP Rejection
+        if vwap_1m:
+            sell_conditions["vwap_rejection"] = current_price < vwap_1m * 0.998  # 0.2% below VWAP
+            
+            if sell_conditions["vwap_rejection"]:
+                reasons.append(f"🔴 VWAP Rejection: Price {current_price:.2f} < VWAP {vwap_1m:.2f}")
+            else:
+                reasons.append(f"✅ Price holding above VWAP")
+        
+        # 4. Momentum Loss (Price fails to make higher highs)
+        if len(prices_1m) >= 10:
+            recent_high = max(prices_1m[-10:])
+            momentum_loss = prices_1m[-1] < recent_high * 0.995  # 0.5% below recent high
+            
+            sell_conditions["momentum_loss"] = momentum_loss
+            
+            if sell_conditions["momentum_loss"]:
+                reasons.append("🔴 Momentum Loss: Failed to sustain near recent highs")
+            else:
+                reasons.append("✅ Momentum intact")
+        
+        # SIGNAL DETERMINATION
+        buy_confidence = calculate_confidence_score(buy_conditions, buy_weights)
+        sell_confidence = calculate_confidence_score(sell_conditions, sell_weights)
+        
+        # More decisive thresholds
+        if sell_confidence > 70:
+            signal = "SELL"
+            confidence = sell_confidence
+        elif buy_confidence > 70:
+            signal = "BUY"
+            confidence = buy_confidence
+        else:
+            signal = "HOLD"
+            confidence = max(buy_confidence, sell_confidence)
+        
+        reasons.append(f"📊 Final - Buy: {buy_confidence:.1f}% | Sell: {sell_confidence:.1f}%")
+
+        return TradingSignal(
+                signal=signal, confidence=confidence,
+                reasons=reasons, technical_indicators=technical_indicators
+        )
         
     except Exception as e:
         logger.error(f"Enhanced analysis error: {str(e)}", exc_info=True)
