@@ -46,7 +46,7 @@ app = FastAPI(
 async def root():
     """Root endpoint with comprehensive API information"""
     return {
-        "message": "Advanced NIFTY Trading System",
+        "message": "NIFTY Buy/Sell/Hold Predictor",
         "version": "2.0.0",
         "features": [
             "Automated NSE pre-open data download",
@@ -60,11 +60,9 @@ async def root():
             "/{symbol}/{limit}/{interval}": "Get historical data",
             "/{symbol}/decide": "Get trading recommendation",
         },
-        "supported_intervals": ["1min", "15min", "1hr"],
+        "supported_intervals": ["1min", "5min"],
         "timestamp_format": "IST 24-hour format (YYYY-MM-DD HH:MM:SS)"
     }
-
-
 
 @app.get("/symbols", response_model=AvailableSymbolsResponse, summary="Get Available Symbols")
 async def get_available_symbols():
