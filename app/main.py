@@ -67,7 +67,14 @@ async def root():
 @app.get("/symbols", response_model=AvailableSymbolsResponse, summary="Get Available Symbols")
 async def get_available_symbols():
     """Get all available NIFTY symbols from the CSV file"""
-    instruments = load_nifty_instruments()
+    try:
+        instruments = load_nifty_instruments()
+    except FileNotFoundError as e:
+        logger.error(f"Error fetching available symbols: {str(e)}")
+        return AvailableSymbolsResponse(
+            total_symbols=0,
+            symbols=[]
+        )
 
     return AvailableSymbolsResponse(
         total_symbols=len(instruments),
@@ -193,8 +200,7 @@ async def download_nse_data_endpoint():
         response_data = {
             "message": "Download completed successfully",
             "session_id": session_id,
-            "file_name": result["file_name"],
-            "download_url": f"/download-file/{result['file_name']}"
+            "file_name": result["file_name"]
         }
         
         # Add information about replaced files if any

@@ -325,7 +325,12 @@ def load_nifty_instruments():
      # Read CSV, handle messy headers
     try: 
         current_date = datetime.now().strftime("%d-%b-%Y")
-        df = pd.read_csv(f"downloads/MW-Pre-Open-Market-{current_date}.csv") 
+        file_path = f"downloads/MW-Pre-Open-Market-{current_date}.csv"
+        
+        if not Path(file_path).exists():
+            raise FileNotFoundError(f"File not found, call the /download endpoint to download the latest CSV file.")
+        
+        df = pd.read_csv(file_path) 
 
         # Find the correct SYMBOL column (strip and clean headers)
         cleaned_columns = [col.strip() for col in df.columns]
@@ -341,7 +346,7 @@ def load_nifty_instruments():
         return df[symbol_col].dropna().astype(str).str.strip().tolist()
     except Exception as e:
         logger.error(f"Could not find CSV file, Call the /download endpoint to download the latest CSV file: {str(e)}")
-        instruments = load_nifty_instruments_json()
+        instruments = load_nifty_instruments()
         symbols = [inst.get("trading_symbol") for inst in instruments if inst.get("trading_symbol")]
         return symbols
 
