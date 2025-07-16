@@ -17,7 +17,6 @@ from enums import (
 )
 from utils import (
     get_historical_data,
-    download_nse_data,
     load_nifty_instruments,
     analyze_trading_signal,
     download_nse_data,
@@ -122,7 +121,6 @@ async def get_historical_data_with_interval(
             "current_ist_time": current_ist
         }
     )
-
 
 @app.get("/{symbol}/decide", response_model=TradingStatusResponse, summary="Get Trading Status")
 async def get_trading_status(symbol: str):

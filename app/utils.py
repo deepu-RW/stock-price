@@ -31,8 +31,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-
-_instruments_cache = None
 DOWNLOAD_BASE_PATH = Path("downloads")
 
 # Ensure the directory exists, creating it along with any missing parents
@@ -167,7 +165,6 @@ def download_nse_data(session_id: str) -> Dict[str, Any]:
             driver.quit()
         except Exception as e:
             print(f"[{session_id}] Error closing browser: {e}")
-
 
 
 def download_pre_open_market_data():
