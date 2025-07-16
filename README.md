@@ -102,5 +102,5 @@ uvicorn main:app --reload
 
 ---
 
- **Note:**: It will take minimym 75 minutes to get enough 1m and 5m candles to get the BUY/SELL/HOLD conditions
+ **Note:**: It will take minimum 75 minutes to get enough 1m and 5m candles to get the BUY/SELL/HOLD conditions
 
