@@ -268,58 +268,6 @@ def download_pre_open_market_data():
         driver.quit()
 
 
-def run_selenium_download():
-    """
-    This function contains the blocking Selenium code.
-    It runs in the background and saves the file to the DOWNLOAD_DIR.
-    It does not return anything.
-    """
-    print("BACKGROUND TASK: Starting Selenium download process...")
-
-    # --- Configure Chrome Options ---
-    chrome_options = Options()
-    prefs = {
-        "download.default_directory": DOWNLOAD_DIR,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-    }
-    chrome_options.add_experimental_option("prefs", prefs)
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-
-    # --- Initialize WebDriver ---
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-
-    try:
-        url = "https://www.nseindia.com/market-data/pre-open-market-cm-and-emerge-market"
-        print(f"BACKGROUND TASK: Navigating to {url}")
-        driver.get(url)
-
-        download_link_locator = (By.ID, "downloadPreopen")
-        wait = WebDriverWait(driver, 30)
-        
-        print("BACKGROUND TASK: Waiting for download link...")
-        download_link_element = wait.until(
-            EC.element_to_be_clickable(download_link_locator)
-        )
-        
-        print("BACKGROUND TASK: Clicking download link.")
-        download_link_element.click()
-
-        # Wait for download to complete (up to 20 seconds)
-        time.sleep(15) # Giving ample time for the download to finish
-        print("BACKGROUND TASK: Download process finished.")
-
-    except Exception as e:
-        print(f"BACKGROUND TASK ERROR: An error occurred during Selenium execution: {e}")
-    finally:
-        print("BACKGROUND TASK: Closing the browser.")
-        driver.quit()
-
-
 def load_nifty_instruments():
     """Load the filtered NIFTY instruments from NIFTY.json"""
      # Read CSV, handle messy headers
